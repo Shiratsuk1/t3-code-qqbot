@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { parseArgs } from '../src/cli.ts';
+import { APP_VERSION } from '../src/config.ts';
 
 test('parseArgs handles boolean flags without swallowing -h or positional arguments', () => {
   const res = parseArgs(['init', '--force', '-h']);
@@ -30,7 +31,7 @@ test('cli.ts executes cleanly when invoked through a symlink/junction (Linux/mac
         else resolveOut(stdout);
       });
     });
-    assert.match(out, /t3-code-qqbot v1\.2\.1/);
+    assert.ok(out.includes(`t3-code-qqbot v${APP_VERSION}`));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

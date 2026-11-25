@@ -393,3 +393,74 @@ test('rollbackThreadTurns dispatches native checkpoint.rollback and waits for ro
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
 });
+
+test('rollbackThreadTurns detects turn-0 baseline completion when rolled-back run is pruned and lastRunOrdinal becomes null', async () => {
+  const server = createServer();
+  const wss = new WebSocketServer({ server });
+
+  let dispatched = false;
+  let pollCount = 0;
+
+  wss.on('connection', socket => {
+    socket.on('message', raw => {
+      const msg = JSON.parse(raw.toString());
+      if (msg._tag === 'Request' && msg.tag === 'orchestration.getThreadProjection') {
+        pollCount++;
+        const done = dispatched && pollCount >= 3;
+        socket.send(
+          JSON.stringify({
+            _tag: 'Exit',
+            requestId: msg.id,
+            exit: {
+              _tag: 'Success',
+              value: {
+                thread: { activeProviderThreadId: 'pt-1', rollbackFailure: null },
+                providerThreads: [{ id: 'pt-1', lastRunOrdinal: done ? null : 1, status: 'idle' }],
+                runs: done
+                  ? [{ id: 'run-2', ordinal: 2, status: 'rolled_back' }]
+                  : [
+                      { id: 'run-1', ordinal: 1, status: 'completed' },
+                      { id: 'run-2', ordinal: 2, status: 'rolled_back' },
+                    ],
+                checkpointScopes: [{ id: 'scope-root', providerThreadId: 'pt-1', kind: 'root_run' }],
+                checkpoints: [
+                  { id: 'cp-0', scopeId: 'scope-root', runId: null, ordinalWithinScope: 0, appRunOrdinal: null, status: 'missing' },
+                  { id: 'cp-1', scopeId: 'scope-root', runId: 'run-1', ordinalWithinScope: 1, appRunOrdinal: 1, status: 'missing' },
+                ],
+              },
+            },
+          }),
+        );
+      } else if (msg._tag === 'Request' && msg.tag === 'orchestration.dispatchCommand') {
+        dispatched = true;
+        socket.send(
+          JSON.stringify({
+            _tag: 'Exit',
+            requestId: msg.id,
+            exit: { _tag: 'Success', value: { sequence: 100 } },
+          }),
+        );
+      }
+    });
+  });
+
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const addr = server.address();
+  assert.ok(addr && typeof addr === 'object');
+  const origin = `http://127.0.0.1:${addr.port}`;
+
+  try {
+    const res = await rollbackThreadTurns(origin, 'tok-rb0', 'thread-1', {
+      turns: 1,
+      restoreFiles: false,
+      pollIntervalMs: 20,
+      timeoutMs: 5_000,
+    });
+    assert.equal(res.targetOrdinal, 0);
+    assert.equal(res.remainingTurns, 0);
+    assert.equal(res.checkpointId, 'cp-0');
+  } finally {
+    wss.close();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});

@@ -43,6 +43,12 @@ export type ThreadRollbackRun = {
   status: string;
 };
 
+export type ThreadRollbackProviderThread = {
+  id: string;
+  lastRunOrdinal?: number | null;
+  status?: string;
+};
+
 export type ThreadRollbackProjection = {
   thread: {
     activeProviderThreadId?: string | null;
@@ -50,6 +56,7 @@ export type ThreadRollbackProjection = {
     rollbackFailure?: { requestId: string; message: string } | null;
   };
   runs: ThreadRollbackRun[];
+  providerThreads?: ThreadRollbackProviderThread[];
   checkpointScopes?: ThreadCheckpointScope[];
   checkpoints?: ThreadCheckpoint[];
 };
@@ -356,7 +363,7 @@ export async function rollbackThreadTurns(
   options: { turns: number; restoreFiles?: boolean; timeoutMs?: number; pollIntervalMs?: number },
 ): Promise<RollbackResult> {
   const restoreFiles = options.restoreFiles ?? false;
-  const timeoutMs = options.timeoutMs ?? 30_000;
+  const timeoutMs = options.timeoutMs ?? 45_000;
   const pollIntervalMs = options.pollIntervalMs ?? 250;
 
   const socket = openT3Socket(origin, token);
@@ -408,6 +415,7 @@ export async function rollbackThreadTurns(
       nextId(),
     );
 
+    const expectedLastOrdinal = plan.targetOrdinal === 0 ? null : plan.targetOrdinal;
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const latest = await sendRpc<ThreadRollbackProjection>(
@@ -419,7 +427,17 @@ export async function rollbackThreadTurns(
       if (latest.thread?.rollbackFailure?.requestId === commandId) {
         throw new Error(latest.thread.rollbackFailure.message || 'T3 Code 撤回执行失败。');
       }
-      if (latest.runs?.some(r => r.id === plan.latestRolledBackRunId && r.status === 'rolled_back')) {
+      const latestRuns = Array.isArray(latest.runs) ? latest.runs : [];
+      const explicitlyRolledBack = latestRuns.some(
+        r => r.id === plan.latestRolledBackRunId && r.status === 'rolled_back',
+      );
+      const runRolledBackOrPruned = !latestRuns.some(
+        r => r.id === plan.latestRolledBackRunId && r.status !== 'rolled_back',
+      );
+      const activePt = latest.providerThreads?.find(pt => pt.id === latest.thread?.activeProviderThreadId);
+      const providerReachedTarget = activePt !== undefined && activePt.lastRunOrdinal === expectedLastOrdinal;
+
+      if (explicitlyRolledBack || (runRolledBackOrPruned && providerReachedTarget)) {
         return {
           threadId,
           rolledBackTurns: plan.rolledBackTurns,
