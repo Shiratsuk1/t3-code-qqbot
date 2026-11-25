@@ -11,6 +11,7 @@ import {
   loadCredentials,
   samePath,
   scopeToHash,
+  SELF_UPDATE_EXIT_CODE,
 } from './config.ts';
 import { runConfigMenu, runConfigSet, runConfigShow, runInitWizard, runQrLoginCommand } from './menu.ts';
 import { Observer } from './observe.ts';
@@ -258,6 +259,12 @@ async function runStartOnce(configPath: string): Promise<void> {
     void bridgeExitPromise.then(({ code, signal }) => {
       if (shuttingDown) return;
       shuttingDown = true;
+      if (code === SELF_UPDATE_EXIT_CODE) {
+        console.info(`Bridge requested graceful self-update restart (code=${code}); restarting immediately...`);
+        terminateChildren(false);
+        void Promise.race([gatewayExitPromise, sleep(2_000)]).then(() => finish());
+        return;
+      }
       const err = new Error(`Bridge exited unexpectedly (code=${code}, signal=${signal})`);
       console.error(err.message);
       terminateChildren(false);

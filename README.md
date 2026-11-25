@@ -83,7 +83,7 @@ node dist/cli.mjs init
 | `/compact` | `/compact 保留关键结论` | 透传给当前 T3 会话执行原生上下文压缩 |
 | `/status` (`/info`) | `/status` | 查看当前会话 ID、Provider、模型、运行状态与后台任务数 |
 | `/tasks` & `/cancel` (`/stop`) | `/tasks` · `/stop` · `/cancel all` | 查看后台任务，或立即中断当前轮次/取消委派子任务 |
-| `/update` (`/upgrade`) | `/update` | 检查 GitHub 最新版并在源码模式下自动拉取重建与热重启 |
+| `/update` (`/upgrade`) | `/update` | 自动检查并拉取更新后热重启：npm 全局安装自动执行 `npm install -g`、离线包目录自动从 npm 拉取官方包覆盖（保留本地配置与状态）、源码仓库自动 `git pull` 重建 |
 
 ## CLI 命令一览
 

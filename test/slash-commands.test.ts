@@ -6,7 +6,9 @@ import test from 'node:test';
 import { parseConfig } from '../src/config.ts';
 import type { Observer } from '../src/observe.ts';
 import {
+  compareSemver,
   createSlashCommandHandler,
+  detectInstallMode,
   parseRewindTurnsArg,
   parseSlashCommand,
   parseThinkingEffort,
@@ -107,6 +109,16 @@ test('parseRewindTurnsArg validates range 1..10 and optional --files flag', () =
   assert.ok(parseRewindTurnsArg('11').error);
   assert.ok(parseRewindTurnsArg('abc').error);
   assert.ok(parseRewindTurnsArg('1 2').error);
+});
+
+test('compareSemver and detectInstallMode handle all release modes cleanly', () => {
+  assert.equal(compareSemver('1.2.3', '1.2.2'), 1);
+  assert.equal(compareSemver('v1.2.2', '1.2.2'), 0);
+  assert.equal(compareSemver('1.2.1', '1.2.2'), -1);
+  assert.equal(compareSemver('1.10.0', '1.9.9'), 1);
+  assert.equal(detectInstallMode('/usr/local/lib/node_modules/t3-code-qqbot'), 'npm-global');
+  assert.equal(detectInstallMode('C:\\Users\\demo\\AppData\\Roaming\\npm\\node_modules\\t3-code-qqbot'), 'npm-global');
+  assert.equal(detectInstallMode('C:\\Tools\\t3-code-qqbot-v1.2.2'), 'standalone');
 });
 
 test('createSlashCommandHandler executes /model, /think, /new, /threads, /use, /rewind, /stop, and /compact', async () => {

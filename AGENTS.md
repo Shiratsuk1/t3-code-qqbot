@@ -27,4 +27,4 @@ npm run package
 npm pack --dry-run
 ```
 
-- 每次对外发版时，GitHub Release 标题与变更说明必须使用简体中文，并附带 `release/` 下最新的 `.zip`（Windows）与 `.tar.gz`（Linux）离线包。
+- 每次对外发版时，GitHub Release 标题与变更说明必须使用简体中文，附带 `release/` 下最新的 `.zip`（Windows）与 `.tar.gz`（Linux）离线包，并保持与 npm（`t3-code-qqbot`）版本号同步。

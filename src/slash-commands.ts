@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { cp, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { APP_VERSION, samePath } from './config.ts';
 import type { Observer, ProjectListItem } from './observe.ts';
@@ -875,58 +876,186 @@ export function createSlashCommandHandler(deps: SlashHandlerDeps) {
   };
 }
 
-async function handleSelfUpdate(deps: SlashHandlerDeps): Promise<void> {
-  const pkgRoot = resolve(import.meta.dirname, '..');
-  const isGitRepo = existsSync(join(pkgRoot, '.git'));
+export function compareSemver(a: string, b: string): number {
+  const parse = (v: string) =>
+    v
+      .trim()
+      .replace(/^v/i, '')
+      .split('-')[0]
+      .split('.')
+      .map(part => Number.parseInt(part, 10) || 0);
+  const pa = parse(a);
+  const pb = parse(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length, 3); i++) {
+    const da = pa[i] ?? 0;
+    const db = pb[i] ?? 0;
+    if (da !== db) return da > db ? 1 : -1;
+  }
+  return 0;
+}
 
-  if (isGitRepo) {
-    await deps.sendReply('正在从 GitHub 拉取最新代码并检查更新…');
-    const before = (await execFileAsync('git', ['rev-parse', '--short', 'HEAD'], { cwd: pkgRoot, windowsHide: true }))
-      .stdout.trim();
-    await execFileAsync('git', ['pull', '--ff-only'], { cwd: pkgRoot, windowsHide: true, timeout: 60_000 });
-    const after = (await execFileAsync('git', ['rev-parse', '--short', 'HEAD'], { cwd: pkgRoot, windowsHide: true }))
-      .stdout.trim();
+export function detectInstallMode(pkgRoot: string): 'git' | 'npm-global' | 'standalone' {
+  if (existsSync(join(pkgRoot, '.git'))) return 'git';
+  const normalized = pkgRoot.replace(/\\/g, '/').toLowerCase();
+  if (normalized.includes('/node_modules/t3-code-qqbot')) return 'npm-global';
+  return 'standalone';
+}
+
+function buildNodeToolEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const nodeDir = dirname(process.execPath);
+  const pathKey = Object.keys(env).find(k => k.toLowerCase() === 'path') ?? 'PATH';
+  const existing = env[pathKey] ?? '';
+  const sep = process.platform === 'win32' ? ';' : ':';
+  env[pathKey] = existing ? `${nodeDir}${sep}${existing}` : nodeDir;
+  return env;
+}
+
+async function runNpm(args: string[], cwd: string, timeout = 120_000): Promise<{ stdout: string; stderr: string }> {
+  const env = buildNodeToolEnv();
+  if (process.platform === 'win32') {
+    const npmCliJs = join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    if (existsSync(npmCliJs)) {
+      return execFileAsync(process.execPath, [npmCliJs, ...args], { cwd, env, windowsHide: true, timeout });
+    }
+    return execFileAsync('npm.cmd', args, { cwd, env, shell: true, windowsHide: true, timeout });
+  }
+  return execFileAsync('npm', args, { cwd, env, windowsHide: true, timeout });
+}
+
+export type SelfUpdateOptions = {
+  pkgRoot?: string;
+  currentVersion?: string;
+  registryUrl?: string;
+  npmGlobalPrefix?: string;
+};
+
+export async function handleSelfUpdate(deps: SlashHandlerDeps, options: SelfUpdateOptions = {}): Promise<void> {
+  const pkgRoot = options.pkgRoot ?? resolve(import.meta.dirname, '..');
+  const currentVersion = options.currentVersion ?? APP_VERSION;
+  const mode = detectInstallMode(pkgRoot);
+
+  if (mode === 'git') {
+    await deps.sendReply('正在从 GitHub 拉取最新源码并检查更新…');
+    const env = buildNodeToolEnv();
+    const before = (
+      await execFileAsync('git', ['rev-parse', '--short', 'HEAD'], { cwd: pkgRoot, env, windowsHide: true })
+    ).stdout.trim();
+    await execFileAsync('git', ['pull', '--ff-only'], { cwd: pkgRoot, env, windowsHide: true, timeout: 60_000 });
+    const after = (
+      await execFileAsync('git', ['rev-parse', '--short', 'HEAD'], { cwd: pkgRoot, env, windowsHide: true })
+    ).stdout.trim();
     if (before === after) {
-      await deps.sendReply(`当前已是最新版本（v${APP_VERSION} · ${after}），无需更新。`);
+      await deps.sendReply(`当前已是最新源码版本（v${currentVersion} · ${after}），无需更新。`);
       return;
     }
-    const npmBin = process.platform === 'win32' ? 'cmd.exe' : 'npm';
-    const npmBuildArgs =
-      process.platform === 'win32'
-        ? ['/d', '/s', '/c', 'npm.cmd install --no-audit --no-fund && npm.cmd run build']
-        : ['run', 'build'];
-    if (process.platform !== 'win32') {
-      await execFileAsync('npm', ['install', '--no-audit', '--no-fund'], {
-        cwd: pkgRoot,
-        windowsHide: true,
-        timeout: 120_000,
-      });
-    }
-    await execFileAsync(npmBin, npmBuildArgs, { cwd: pkgRoot, windowsHide: true, timeout: 120_000 });
-    await deps.sendReply(`更新完成（${before} -> ${after}），正在热重启桥接服务以加载新版…`);
+    await runNpm(['install', '--no-audit', '--no-fund'], pkgRoot, 120_000);
+    await runNpm(['run', 'build'], pkgRoot, 120_000);
+    await deps.sendReply(`源码更新完成（${before} -> ${after}），正在热重启服务以加载新版…`);
     if (deps.triggerGracefulRestart) {
       setTimeout(() => deps.triggerGracefulRestart!(), 800);
     }
     return;
   }
 
-  // Non-git installation (npm global or Release ZIP/TAR.GZ): check latest GitHub Release tag
-  const res = await fetch('https://api.github.com/repos/Shiratsuk1/t3-code-qqbot/releases/latest', {
-    headers: { Accept: 'application/vnd.github+json', 'User-Agent': `t3-code-qqbot/${APP_VERSION}` },
-    signal: AbortSignal.timeout(10_000),
+  // Both npm-global and standalone installations check npm registry first for latest version + tarball
+  const registryUrl = options.registryUrl ?? 'https://registry.npmjs.org/t3-code-qqbot/latest';
+  const res = await fetch(registryUrl, {
+    headers: { Accept: 'application/json', 'User-Agent': `t3-code-qqbot/${currentVersion}` },
+    signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) {
-    await deps.sendReply(`当前版本：v${APP_VERSION}。检查 GitHub 最新版本失败 (HTTP ${res.status})。`);
+    await deps.sendReply(`当前版本：v${currentVersion}。检查 npm 最新版本失败 (HTTP ${res.status})。`);
     return;
   }
-  const latest = (await res.json()) as { tag_name?: string; html_url?: string };
-  const latestTag = latest.tag_name ?? `v${APP_VERSION}`;
-  if (latestTag === `v${APP_VERSION}`) {
-    await deps.sendReply(`当前已是最新版本：${latestTag}。`);
-  } else {
+  const meta = (await res.json()) as {
+    version?: string;
+    dist?: { tarball?: string };
+  };
+  const latestVersion = meta.version?.trim();
+  if (!latestVersion) {
+    await deps.sendReply(`当前版本：v${currentVersion}。npm 返回的版本信息无效。`);
+    return;
+  }
+  if (compareSemver(latestVersion, currentVersion) <= 0) {
+    await deps.sendReply(`当前已是 npm 最新版本（v${currentVersion}），无需更新。`);
+    return;
+  }
+
+  if (mode === 'npm-global') {
+    await deps.sendReply(`发现 npm 新版本 v${latestVersion}（当前 v${currentVersion}），正在通过 npm 自动更新…`);
+    const installArgs = ['install', '-g', `t3-code-qqbot@${latestVersion}`, '--no-audit', '--no-fund'];
+    if (options.npmGlobalPrefix) {
+      installArgs.push('--prefix', options.npmGlobalPrefix);
+    }
+    // Use tmpdir() as cwd so Windows does not hold a directory handle on pkgRoot while npm renames it
+    await runNpm(installArgs, tmpdir(), 180_000);
+    await deps.sendReply(`已通过 npm 自动更新至 v${latestVersion}（原 v${currentVersion}），正在热重启服务以加载新版…`);
+    if (deps.triggerGracefulRestart) {
+      setTimeout(() => deps.triggerGracefulRestart!(), 800);
+    }
+    return;
+  }
+
+  // Standalone release directory (e.g. extracted .zip/.tar.gz): download & apply official npm tarball cleanly
+  const tarballUrl = meta.dist?.tarball;
+  if (!tarballUrl || !tarballUrl.startsWith('https://')) {
     await deps.sendReply(
-      `发现新版本 ${latestTag}（当前 v${APP_VERSION}）！\n• npm 用户升级：npm i -g t3-code-qqbot@latest && t3-qqbot service restart\n• 发布页：${latest.html_url ?? 'https://github.com/Shiratsuk1/t3-code-qqbot/releases'}`,
+      `发现 npm 新版本 v${latestVersion}（当前 v${currentVersion}），但未获取到有效的下载包地址，请手动执行 npm i -g t3-code-qqbot@latest。`,
     );
+    return;
+  }
+
+  await deps.sendReply(`发现 npm 新版本 v${latestVersion}（当前 v${currentVersion}），正在从 npm 拉取更新包…`);
+  const stageDir = await mkdtemp(join(tmpdir(), 't3-qqbot-update-'));
+  try {
+    const tgzPath = join(stageDir, `t3-code-qqbot-${latestVersion}.tgz`);
+    const extractDir = join(stageDir, 'extracted');
+    await mkdir(extractDir, { recursive: true });
+
+    const dl = await fetch(tarballUrl, { signal: AbortSignal.timeout(60_000) });
+    if (!dl.ok) throw new Error(`下载 npm 更新包失败 (HTTP ${dl.status})`);
+    const bytes = Buffer.from(await dl.arrayBuffer());
+    await writeFile(tgzPath, bytes);
+
+    await execFileAsync('tar', ['-xzf', tgzPath, '-C', extractDir], { windowsHide: true, timeout: 60_000 });
+    const unpackedPkgDir = join(extractDir, 'package');
+    if (!existsSync(join(unpackedPkgDir, 'dist', 'bridge.mjs')) || !existsSync(join(unpackedPkgDir, 'package.json'))) {
+      throw new Error('下载的 npm 包结构不完整（缺少 dist/bridge.mjs 或 package.json）');
+    }
+
+    const oldPkgRaw = await readFile(join(pkgRoot, 'package.json'), 'utf8').catch(() => '{}');
+    const newPkgRaw = await readFile(join(unpackedPkgDir, 'package.json'), 'utf8');
+    const oldDeps = JSON.stringify((JSON.parse(oldPkgRaw) as { dependencies?: unknown }).dependencies ?? {});
+    const newDeps = JSON.stringify((JSON.parse(newPkgRaw) as { dependencies?: unknown }).dependencies ?? {});
+
+    // Replace runtime files only — never touch config.json, credentials.json, or state/
+    for (const entry of [
+      'dist',
+      'docs',
+      'scripts',
+      'package.json',
+      'README.md',
+      'LICENSE',
+      'config.example.json',
+      'credentials.example.json',
+    ]) {
+      const src = join(unpackedPkgDir, entry);
+      if (!existsSync(src)) continue;
+      const dst = join(pkgRoot, entry);
+      await cp(src, dst, { recursive: true, force: true });
+    }
+
+    if (oldDeps !== newDeps) {
+      await runNpm(['install', '--omit=dev', '--no-audit', '--no-fund'], pkgRoot, 180_000);
+    }
+
+    await deps.sendReply(`已通过 npm 自动更新至 v${latestVersion}（原 v${currentVersion}），正在热重启服务以加载新版…`);
+    if (deps.triggerGracefulRestart) {
+      setTimeout(() => deps.triggerGracefulRestart!(), 800);
+    }
+  } finally {
+    await rm(stageDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 

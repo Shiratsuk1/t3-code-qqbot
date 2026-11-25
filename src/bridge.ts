@@ -7,7 +7,14 @@ import { basename, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { QQBot, StreamInputState, StreamSession } from '@tencent-connect/qqbot-nodejs';
 import { ApiClient, MessageApi } from '@tencent-connect/qqbot-nodejs/protocol';
-import { findBindingForScope, isMainModule, loadConfig, loadCredentials, samePath } from './config.ts';
+import {
+  findBindingForScope,
+  isMainModule,
+  loadConfig,
+  loadCredentials,
+  samePath,
+  SELF_UPDATE_EXIT_CODE,
+} from './config.ts';
 import { Observer } from './observe.ts';
 import type { ProjectListItem } from './observe.ts';
 import {
@@ -148,6 +155,7 @@ export async function createBridgeRuntime(
     attachFileLogger?: boolean;
     onAccepted?: (event: InboundEvent, target: Target, binding: ResolvedBinding, scope: string) => Promise<void>;
     checkT3Health?: () => Promise<boolean>;
+    onRestartRequested?: () => void;
   } = {},
 ): Promise<BridgeRuntime> {
   const root = resolve(config.stateDir);
@@ -307,7 +315,11 @@ export async function createBridgeRuntime(
         ),
       triggerGracefulRestart: () => {
         console.info('Triggering graceful restart after /update...');
-        process.kill(process.pid, 'SIGTERM');
+        if (options.onRestartRequested) {
+          options.onRestartRequested();
+        } else {
+          process.exit(SELF_UPDATE_EXIT_CODE);
+        }
       },
     });
 
@@ -797,7 +809,14 @@ export async function runBridgeCli(argv: string[] = process.argv.slice(2)): Prom
     return;
   }
 
-  const runtime = await createBridgeRuntime(config, credentials, { listen: true });
+  let runtime!: BridgeRuntime;
+  runtime = await createBridgeRuntime(config, credentials, {
+    listen: true,
+    onRestartRequested: () => {
+      console.info(`Restarting T3 QQBot bridge after self-update (exit code ${SELF_UPDATE_EXIT_CODE})...`);
+      void runtime.close().finally(() => process.exit(SELF_UPDATE_EXIT_CODE));
+    },
+  });
   const address = runtime.server?.address();
   const port = typeof address === 'object' && address ? address.port : config.bridge.port;
   console.info(
