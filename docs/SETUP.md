@@ -301,7 +301,7 @@ t3-qqbot service uninstall
 ```
 
 底层行为：
-- **Windows**：在当前用户下免管理员权限注册 Windows 计划任务（`T3 Code QQBot`），通过隐藏 PowerShell 包装启动 `t3-qqbot start --supervise`，无黑框弹窗、崩溃自动指数退避拉起，全部日志落盘至 `state\service.log`、`state\bridge.log` 与 `state\gateway.log`。执行 `t3-qqbot service stop` / `uninstall` 时会自动一并清理子进程，不留端口占用残留。
+- **Windows**：在当前用户下免管理员权限注册 Windows 计划任务（`T3 Code QQBot`），通过 GUI 子系统宿主 `wscript.exe` 与 `state\run-service.vbs`（`SW_HIDE`）直接无窗拉起 `node.exe` 运行 `start --supervise --log-file`，在 Windows 10 及 Windows 11（默认 Windows Terminal）下均彻底零黑框弹窗、零任务栏残留；崩溃自动指数退避拉起，全部日志原生落盘至 `state\service.log`、`state\bridge.log` 与 `state\gateway.log`。执行 `t3-qqbot service stop` / `uninstall` 时会自动一并清理宿主与子进程，不留端口占用残留。
 - **Linux**：自动生成并启用 `~/.config/systemd/user/t3-code-qqbot.service`（含 `Restart=always`、`RestartSec=5`、`KillMode=control-group`）。如需在退出 SSH 后持续运行，按安装完成时的提示执行一次 `sudo loginctl enable-linger "$USER"` 即可；日志通过 `journalctl --user -u t3-code-qqbot.service -f` 查看。
 
 *(仓库 `scripts/` 目录下仍保留手工脚本模板 `install-windows-task.ps1` 与 `t3-code-qqbot.service` 供定制参考。)*

@@ -13,7 +13,7 @@
 ## 2. 架构与协议原则
 
 - **优先对接 T3 Code 原生协议**：所有会话控制、流式监听、附件上传、模型切换与回溯撤回，均应直接调用 T3 Code 原生 MCP 工具或原生 WebSocket（`/ws?orchestrationProtocol=2`），如 `message.dispatch`、`orchestration.subscribeThread`、`orchestration.getThreadProjection`、`checkpoint.rollback`；严禁将其他客户端（如 `agy-qqbot`）的旁路实现硬套到 T3 Code 上。
-- **跨平台兼容**：所有核心逻辑与服务管理必须同时兼容 **Windows 10/11** 与 **Linux**。
+- **跨平台兼容与 Windows 零窗口守护**：所有核心逻辑与服务管理必须同时兼容 **Windows 10/11** 与 **Linux**。Windows 后台计划任务**严禁**以 `powershell.exe -WindowStyle Hidden` 或 `cmd.exe` 作为入口（CUI 子系统在 Windows 11 Windows Terminal 下会永久残留可见黑框），必须通过 GUI 子系统宿主（`wscript.exe //B //Nologo` + UTF-16 LE BOM `run-service.vbs` 调用 `WScript.Shell.Run(..., 0, True)`）直启 `node.exe --log-file`，且每次涉及守护修改必须在真实桌面会话下实测 `MainWindowHandle === 0` 与零新增终端窗口。
 - **隐私零泄漏**：严禁在代码、测试、文档或发布包中残留任何个人主机名、用户名、私有 IP、凭据或定制服务端补丁。
 
 ## 3. 构建、验证与发布闭环

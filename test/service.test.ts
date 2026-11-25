@@ -4,7 +4,7 @@ import {
   DEFAULT_LINUX_SERVICE,
   DEFAULT_WINDOWS_TASK,
   renderSystemdUnit,
-  renderWindowsWrapperPs1,
+  renderWindowsLauncherVbs,
   sanitizeServiceName,
 } from '../src/service.ts';
 
@@ -30,14 +30,31 @@ test('renderSystemdUnit outputs valid systemd user unit with ExecStart, Restart,
   assert.doesNotMatch(unit, /network-online\.target/);
 });
 
-test('renderWindowsWrapperPs1 runs --supervise with Continue error policy around 2>&1', () => {
-  const ps1 = renderWindowsWrapperPs1({
+test('renderWindowsLauncherVbs launches node.exe hidden via WScript.Shell.Run(..., 0, True) with --log-file', () => {
+  const vbs = renderWindowsLauncherVbs({
     nodePath: 'C:\\Program Files\\nodejs\\node.exe',
     cliEntry: 'C:\\Users\\Alice\\AppData\\Roaming\\npm\\node_modules\\t3-code-qqbot\\dist\\cli.mjs',
-    configPath: "C:\\Users\\O'Brien\\t3-qqbot\\config.json",
-    stateDir: "C:\\Users\\O'Brien\\t3-qqbot\\state",
+    configPath: 'C:\\Users\\张三\\t3 "qqbot"\\config.json',
+    workingDir: 'C:\\Users\\张三\\t3 "qqbot"',
+    logPath: 'C:\\Users\\张三\\t3 "qqbot"\\state\\service.log',
   });
-  assert.match(ps1, /--supervise --config \$ConfigPath/);
-  assert.match(ps1, /\$ErrorActionPreference = 'Continue'/);
-  assert.match(ps1, /O''Brien/);
+  assert.match(vbs, /CreateObject\("WScript\.Shell"\)/);
+  assert.match(vbs, /sh\.Environment\("Process"\)\("NODE_NO_WARNINGS"\) = "1"/);
+  assert.match(vbs, /t3 ""qqbot""/);
+  assert.match(vbs, /start --supervise --config/);
+  assert.match(vbs, /--log-file/);
+  assert.match(vbs, /sh\.Run\(cmd, 0, True\)/);
+  assert.match(vbs, /WScript\.Quit exitCode/);
+  assert.doesNotMatch(vbs, /powershell/i);
+  assert.throws(
+    () =>
+      renderWindowsLauncherVbs({
+        nodePath: 'node.exe',
+        cliEntry: 'cli.mjs',
+        configPath: 'bad\npath',
+        workingDir: 'C:\\work',
+        logPath: 'service.log',
+      }),
+    /Invalid multiline value/,
+  );
 });

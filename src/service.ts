@@ -57,36 +57,39 @@ export function renderSystemdUnit(options: {
   ].join('\n');
 }
 
-export function renderWindowsWrapperPs1(options: {
+function vbsStringLiteral(value: string): string {
+  if (/[\r\n]/.test(value)) {
+    throw new Error(`Invalid multiline value for Windows launcher: ${JSON.stringify(value)}`);
+  }
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+export function renderWindowsLauncherVbs(options: {
   nodePath: string;
   cliEntry: string;
   configPath: string;
-  stateDir: string;
+  workingDir: string;
+  logPath: string;
 }): string {
-  const psSingle = (value: string) => `'${value.replace(/'/g, "''")}'`;
   return [
-    '$ErrorActionPreference = \'Stop\'',
-    `$NodePath = ${psSingle(options.nodePath)}`,
-    `$CliEntry = ${psSingle(options.cliEntry)}`,
-    `$ConfigPath = ${psSingle(options.configPath)}`,
-    `$StateDir = ${psSingle(options.stateDir)}`,
-    'New-Item -Path $StateDir -ItemType Directory -Force | Out-Null',
-    '$LogPath = Join-Path $StateDir \'service.log\'',
-    '$env:NODE_NO_WARNINGS = \'1\'',
-    '$prev = $ErrorActionPreference',
-    '$ErrorActionPreference = \'Continue\'',
-    'try {',
-    '    & $NodePath $CliEntry start --supervise --config $ConfigPath 2>&1 | ForEach-Object {',
-    '        $text = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { "$_" }',
-    '        Add-Content -LiteralPath $LogPath -Encoding utf8 -Value (\'[{0:yyyy-MM-dd HH:mm:ss}] {1}\' -f [DateTime]::Now, $text)',
-    '    }',
-    '    $code = $LASTEXITCODE',
-    '} finally {',
-    '    $ErrorActionPreference = $prev',
-    '}',
-    'exit $code',
+    'Option Explicit',
+    'Dim sh, nodePath, cliEntry, configPath, logPath, cmd, exitCode',
+    'Set sh = CreateObject("WScript.Shell")',
+    `sh.CurrentDirectory = ${vbsStringLiteral(options.workingDir)}`,
+    'sh.Environment("Process")("NODE_NO_WARNINGS") = "1"',
+    `nodePath = ${vbsStringLiteral(options.nodePath)}`,
+    `cliEntry = ${vbsStringLiteral(options.cliEntry)}`,
+    `configPath = ${vbsStringLiteral(options.configPath)}`,
+    `logPath = ${vbsStringLiteral(options.logPath)}`,
+    'cmd = """" & nodePath & """ """ & cliEntry & """ start --supervise --config """ & configPath & """ --log-file """ & logPath & """"',
+    'exitCode = sh.Run(cmd, 0, True)',
+    'WScript.Quit exitCode',
     '',
   ].join('\r\n');
+}
+
+function encodeUtf16LeWithBom(content: string): Buffer {
+  return Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(content, 'utf16le')]);
 }
 
 async function runPsEncoded(script: string): Promise<{ stdout: string; stderr: string }> {
@@ -116,26 +119,54 @@ async function runWindowsServiceAction(
 ): Promise<void> {
   const psSingle = (value: string) => `'${value.replace(/'/g, "''")}'`;
 
+  const stopProcessesScript = (targets: string[]) => {
+    const literals = targets.map(t => psSingle(t)).join(', ');
+    return `
+$targets = @(${literals})
+$skipPids = @($PID, ${process.pid})
+Get-CimInstance Win32_Process -Filter "Name='wscript.exe' OR Name='node.exe' OR Name='powershell.exe'" -ErrorAction SilentlyContinue |
+  Where-Object {
+    if (-not $_.CommandLine -or ($skipPids -contains $_.ProcessId)) { return $false }
+    foreach ($needle in $targets) {
+      if ($needle -and $_.CommandLine.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return $true
+      }
+    }
+    return $false
+  } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+`;
+  };
+
   if (action === 'install') {
     const config = await loadConfig(options.configPath);
     await mkdir(config.stateDir, { recursive: true });
-    const wrapperPath = join(config.stateDir, 'run-service.ps1');
-    const wrapperContent = renderWindowsWrapperPs1({
+    const launcherPath = join(config.stateDir, 'run-service.vbs');
+    const legacyPs1Path = join(config.stateDir, 'run-service.ps1');
+    const logPath = join(config.stateDir, 'service.log');
+    const launcherContent = renderWindowsLauncherVbs({
       nodePath: process.execPath,
       cliEntry: options.cliEntry,
       configPath: config.configPath,
-      stateDir: config.stateDir,
+      workingDir: config.configDir,
+      logPath,
     });
-    await writeFile(wrapperPath, wrapperContent, 'utf8');
+    await writeFile(launcherPath, encodeUtf16LeWithBom(launcherContent));
+    await unlink(legacyPs1Path).catch(() => {});
 
-    const psExe = join(process.env.WINDIR || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const wscriptExe = join(process.env.WINDIR || 'C:\\Windows', 'System32', 'wscript.exe');
     const registerScript = `
 $ErrorActionPreference = 'Stop'
 $taskName = ${psSingle(options.taskName)}
-$psExe = ${psSingle(psExe)}
-$wrapper = ${psSingle(wrapperPath)}
+$existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if ($existing) {
+  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+}
+${stopProcessesScript([config.configPath, launcherPath, legacyPs1Path])}
+$wscriptExe = ${psSingle(wscriptExe)}
+$launcher = ${psSingle(launcherPath)}
 $workDir = ${psSingle(config.configDir)}
-$action = New-ScheduledTaskAction -Execute $psExe -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"$wrapper\`"" -WorkingDirectory $workDir
+$action = New-ScheduledTaskAction -Execute $wscriptExe -Argument "//B //Nologo \`"$launcher\`"" -WorkingDirectory $workDir
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Description 'T3 Code QQBot Bridge & Official WebSocket Gateway' -Force | Out-Null
@@ -143,24 +174,21 @@ Start-ScheduledTask -TaskName $taskName
 Write-Output "INSTALLED_AND_STARTED"
 `;
     await runPsEncoded(registerScript);
-    console.log(`Installed & started Windows background service "${options.taskName}".`);
-    console.log(`  Config:  ${config.configPath}`);
-    console.log(`  Wrapper: ${wrapperPath}`);
-    console.log(`  Logs:    ${join(config.stateDir, 'service.log')}`);
-    console.log(`           ${join(config.stateDir, 'bridge.log')}`);
-    console.log(`           ${join(config.stateDir, 'gateway.log')}`);
+    console.log(`Installed & started Windows background service "${options.taskName}" (GUI zero-window wscript launcher).`);
+    console.log(`  Config:   ${config.configPath}`);
+    console.log(`  Launcher: ${launcherPath}`);
+    console.log(`  Logs:     ${logPath}`);
+    console.log(`            ${join(config.stateDir, 'bridge.log')}`);
+    console.log(`            ${join(config.stateDir, 'gateway.log')}`);
     return;
   }
 
-  const stopProcessesScript = (configPath: string) => `
-$cfg = ${psSingle(configPath)}
-Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='powershell.exe'" -ErrorAction SilentlyContinue |
-  Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($cfg, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and $_.ProcessId -ne $PID } |
-  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-`;
-
   if (action === 'stop' || action === 'uninstall') {
     const absConfig = resolve(options.configPath);
+    const config = await loadConfig(absConfig).catch(() => null);
+    const stateDir = config?.stateDir ?? join(dirname(absConfig), 'state');
+    const launcherPath = join(stateDir, 'run-service.vbs');
+    const legacyPs1Path = join(stateDir, 'run-service.ps1');
     const script = `
 $ErrorActionPreference = 'Stop'
 $taskName = ${psSingle(options.taskName)}
@@ -169,14 +197,12 @@ if ($task) {
   Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
   ${action === 'uninstall' ? 'Unregister-ScheduledTask -TaskName $taskName -Confirm:$false' : ''}
 }
-${stopProcessesScript(absConfig)}
+${stopProcessesScript([absConfig, launcherPath, legacyPs1Path])}
 `;
     await runPsEncoded(script);
     if (action === 'uninstall') {
-      const config = await loadConfig(absConfig).catch(() => null);
-      if (config) {
-        await unlink(join(config.stateDir, 'run-service.ps1')).catch(() => {});
-      }
+      await unlink(launcherPath).catch(() => {});
+      await unlink(legacyPs1Path).catch(() => {});
       console.log(`Uninstalled Windows background service "${options.taskName}".`);
     } else {
       console.log(`Stopped Windows background service "${options.taskName}".`);

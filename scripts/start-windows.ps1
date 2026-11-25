@@ -35,21 +35,8 @@ if (-not [System.IO.Path]::IsPathRooted($stateDir)) {
 New-Item -Path $stateDir -ItemType Directory -Force | Out-Null
 $logPath = Join-Path $stateDir 'service.log'
 
+# Foreground/manual Windows runner. For zero-window background startup, use `t3-qqbot service install`
+# or `scripts\install-windows-task.ps1` (which registers GUI-subsystem wscript.exe + run-service.vbs).
 $env:NODE_NO_WARNINGS = '1'
-
-# PowerShell 5.1 converts native stderr lines into ErrorRecords when using 2>&1;
-# switch to Continue around the native command so warnings never abort the service.
-$previousPreference = $ErrorActionPreference
-$ErrorActionPreference = 'Continue'
-try {
-    & $NodePath $cliEntry start --config $ConfigPath 2>&1 | ForEach-Object {
-        $text = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { "$_" }
-        $line = '[{0:yyyy-MM-dd HH:mm:ss}] {1}' -f [DateTime]::Now, $text
-        Add-Content -LiteralPath $logPath -Encoding utf8 -Value $line
-    }
-    $exitCode = $LASTEXITCODE
-} finally {
-    $ErrorActionPreference = $previousPreference
-}
-
-exit $exitCode
+& $NodePath $cliEntry start --supervise --config $ConfigPath --log-file $logPath
+exit $LASTEXITCODE

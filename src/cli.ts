@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
+import { createWriteStream } from 'node:fs';
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, extname, join, resolve } from 'node:path';
+import type { Readable } from 'node:stream';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
   APP_VERSION,
@@ -79,8 +81,8 @@ function printHelp(): void {
   login [--config <路径>]            终端扫码一键绑定 QQ 机器人（自动获取 AppID、AppSecret 与 user_openid）
   config [show|set <键> <值>] [--config <路径>]
                                      打开交互式配置菜单（或直接查看/修改单项配置）
-  start [--config <路径>] [--supervise]
-                                     一键同时启动桥接与 QQ 网关（--supervise 崩溃自动重启）
+  start [--config <路径>] [--supervise] [--log-file <路径>]
+                                     一键同时启动桥接与 QQ 网关（--supervise 崩溃自动重启；--log-file 将输出带时间戳写入文件）
   service <install|uninstall|status|start|stop|restart> [--config <路径>] [--name <名称>]
                                      注册与管理本机后台自守护（Windows 计划任务 / Linux systemd --user）
   bridge [--config <路径>]           仅启动 T3 桥接 HTTP 服务
@@ -141,9 +143,84 @@ async function waitForBridgeOrExit(
   return { ready: false, exitedEarly };
 }
 
-async function cmdStart(configPath: string, supervise = false): Promise<void> {
+interface ServiceFileLogger {
+  writeLine(line: string): void;
+  attach(stream: Readable | null): void;
+  close(): Promise<void>;
+}
+
+function formatLocalLogTimestamp(date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+async function createServiceFileLogger(logFilePath: string): Promise<ServiceFileLogger> {
+  const absPath = resolve(logFilePath);
+  await mkdir(dirname(absPath), { recursive: true });
+  const ws = createWriteStream(absPath, { flags: 'a', encoding: 'utf8' });
+  ws.on('error', () => {
+    // Avoid unhandled stream errors crashing the supervisor
+  });
+
+  const writeLine = (line: string) => {
+    if (ws.destroyed || ws.writableEnded) return;
+    ws.write(`[${formatLocalLogTimestamp()}] ${line}\n`);
+  };
+
+  const attach = (stream: Readable | null) => {
+    if (!stream) return;
+    stream.setEncoding('utf8');
+    let pending = '';
+    stream.on('data', (chunk: string) => {
+      pending += chunk;
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop() ?? '';
+      for (const line of lines) {
+        if (line.length > 0) writeLine(line);
+      }
+    });
+    stream.on('end', () => {
+      if (pending.length > 0) {
+        writeLine(pending);
+        pending = '';
+      }
+    });
+  };
+
+  const close = () =>
+    new Promise<void>(resolveClose => {
+      if (ws.destroyed || ws.writableEnded) {
+        resolveClose();
+        return;
+      }
+      ws.end(() => resolveClose());
+    });
+
+  return { writeLine, attach, close };
+}
+
+async function cmdStart(configPath: string, supervise = false, logFilePath?: string): Promise<void> {
+  const logger = logFilePath ? await createServiceFileLogger(logFilePath) : undefined;
+  const logInfo = (message: string) => {
+    if (logger) logger.writeLine(message);
+    else console.info(message);
+  };
+  const logError = (message: string) => {
+    if (logger) logger.writeLine(message);
+    else console.error(message);
+  };
+
   if (!supervise) {
-    await runStartOnce(configPath);
+    try {
+      await runStartOnce(configPath, logger);
+    } catch (error) {
+      if (logger) {
+        logError(`Fatal: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      throw error;
+    } finally {
+      await logger?.close();
+    }
     return;
   }
 
@@ -159,14 +236,14 @@ async function cmdStart(configPath: string, supervise = false): Promise<void> {
     while (!stopping) {
       const startedAt = Date.now();
       try {
-        await runStartOnce(configPath);
+        await runStartOnce(configPath, logger);
         if (stopping) break;
       } catch (error) {
         if (stopping) break;
         const uptimeMs = Date.now() - startedAt;
         consecutiveFailures = uptimeMs > 60_000 ? 1 : consecutiveFailures + 1;
         const backoffMs = Math.min(30_000, 3_000 * Math.pow(2, consecutiveFailures - 1));
-        console.error(
+        logError(
           `Supervisor caught failure (${error instanceof Error ? error.message : String(error)}); restarting in ${backoffMs / 1000}s...`,
         );
         await sleep(backoffMs);
@@ -175,22 +252,36 @@ async function cmdStart(configPath: string, supervise = false): Promise<void> {
   } finally {
     process.off('SIGINT', markStop);
     process.off('SIGTERM', markStop);
+    await logger?.close();
   }
 }
 
-async function runStartOnce(configPath: string): Promise<void> {
+async function runStartOnce(configPath: string, logger?: ServiceFileLogger): Promise<void> {
+  const logInfo = (message: string) => {
+    if (logger) logger.writeLine(message);
+    else console.info(message);
+  };
+  const logError = (message: string) => {
+    if (logger) logger.writeLine(message);
+    else console.error(message);
+  };
+
   const config = await loadConfig(configPath);
   await loadCredentials(config);
 
   const bridgeEntry = getSiblingEntry('bridge');
   const gatewayEntry = getSiblingEntry('gateway');
 
-  console.info(`Starting T3 QQBot bridge (${bridgeEntry})...`);
+  logInfo(`Starting T3 QQBot bridge (${bridgeEntry})...`);
   const bridgeChild = spawn(process.execPath, [bridgeEntry, config.configPath], {
-    stdio: 'inherit',
+    stdio: logger ? ['ignore', 'pipe', 'pipe'] : 'inherit',
     env: process.env,
     windowsHide: true,
   });
+  if (logger) {
+    logger.attach(bridgeChild.stdout);
+    logger.attach(bridgeChild.stderr);
+  }
 
   const bridgeExitPromise = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolveExit => {
     bridgeChild.once('exit', (code, signal) => resolveExit({ code, signal }));
@@ -210,12 +301,16 @@ async function runStartOnce(configPath: string): Promise<void> {
     throw new Error(`Bridge failed to start listening on ${healthUrl}`);
   }
 
-  console.info(`Starting T3 QQBot gateway (${gatewayEntry})...`);
+  logInfo(`Starting T3 QQBot gateway (${gatewayEntry})...`);
   const gatewayChild = spawn(process.execPath, [gatewayEntry, config.configPath], {
-    stdio: 'inherit',
+    stdio: logger ? ['ignore', 'pipe', 'pipe'] : 'inherit',
     env: process.env,
     windowsHide: true,
   });
+  if (logger) {
+    logger.attach(gatewayChild.stdout);
+    logger.attach(gatewayChild.stderr);
+  }
 
   const gatewayExitPromise = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolveExit => {
     gatewayChild.once('exit', (code, signal) => resolveExit({ code, signal }));
@@ -260,13 +355,13 @@ async function runStartOnce(configPath: string): Promise<void> {
       if (shuttingDown) return;
       shuttingDown = true;
       if (code === SELF_UPDATE_EXIT_CODE) {
-        console.info(`Bridge requested graceful self-update restart (code=${code}); restarting immediately...`);
+        logInfo(`Bridge requested graceful self-update restart (code=${code}); restarting immediately...`);
         terminateChildren(false);
         void Promise.race([gatewayExitPromise, sleep(2_000)]).then(() => finish());
         return;
       }
       const err = new Error(`Bridge exited unexpectedly (code=${code}, signal=${signal})`);
-      console.error(err.message);
+      logError(err.message);
       terminateChildren(false);
       void Promise.race([gatewayExitPromise, sleep(2_000)]).then(() => finish(err));
     });
@@ -275,7 +370,7 @@ async function runStartOnce(configPath: string): Promise<void> {
       if (shuttingDown) return;
       shuttingDown = true;
       const err = new Error(`Gateway exited unexpectedly (code=${code}, signal=${signal})`);
-      console.error(err.message);
+      logError(err.message);
       terminateChildren(false);
       void Promise.race([bridgeExitPromise, sleep(2_000)]).then(() => finish(err));
     });
@@ -586,7 +681,8 @@ async function main(): Promise<void> {
     return;
   }
   if (command === 'start') {
-    await cmdStart(configPath, flags.get('supervise') === true);
+    const logFile = typeof flags.get('log-file') === 'string' ? String(flags.get('log-file')) : undefined;
+    await cmdStart(configPath, flags.get('supervise') === true, logFile);
     return;
   }
   if (command === 'service') {
