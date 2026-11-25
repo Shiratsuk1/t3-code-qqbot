@@ -313,6 +313,7 @@ export async function createBridgeRuntime(
     runId: string,
     sequence?: number,
     live = true,
+    emptyCompletedNotice?: string,
   ): Promise<void> {
     const maxChars = config.bridge.maxMessageChars;
     const streams = new Map<
@@ -453,9 +454,12 @@ export async function createBridgeRuntime(
     if (!result.body) {
       console.info('T3 finished without a text reply', key, runId, result.status);
       if (result.status !== 'completed') {
-        await qq.sendText(reply, `T3 Code 本轮任务未完成（状态：${result.status}），请在 T3 Code 中查看详情。`).catch(
+        const statusText = result.status === 'interrupted' ? '已中断' : `状态：${result.status}`;
+        await qq.sendText(reply, `T3 Code 本轮任务未完成（${statusText}），请在 T3 Code 中查看详情。`).catch(
           () => {},
         );
+      } else if (emptyCompletedNotice) {
+        await qq.sendText(reply, emptyCompletedNotice).catch(() => {});
       }
     }
     if (result.status === 'completed' && result.backgroundTaskIds.length) {
@@ -488,6 +492,7 @@ export async function createBridgeRuntime(
       return;
     }
 
+    let emptyCompletedNotice: string | undefined;
     if (config.bridge.enableSlashCommands) {
       const slash = parseSlashCommand(event.content ?? '', Boolean(event.attachments?.length));
       if (slash) {
@@ -496,6 +501,9 @@ export async function createBridgeRuntime(
           if (outcome === 'handled') {
             console.info('QQ slash command handled', slash.name, key);
             return;
+          }
+          if (slash.name === 'compact') {
+            emptyCompletedNotice = '当前 T3 会话上下文压缩已完成。';
           }
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
@@ -573,7 +581,7 @@ export async function createBridgeRuntime(
       await writeFile(join(root, digest(accepted.runId) + '.run.json'), JSON.stringify(record), { mode: 0o600 });
       timing('dispatch_ack', key, accepted.runId);
       console.info('T3 accepted', key, threadId, accepted.runId);
-      await observeRun(key, reply, threadId, accepted.runId, accepted.sequence);
+      await observeRun(key, reply, threadId, accepted.runId, accepted.sequence, true, emptyCompletedNotice);
     } finally {
       stopTyping();
     }

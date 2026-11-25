@@ -66,32 +66,32 @@ function getSiblingEntry(name: 'bridge' | 'gateway' | 'publish'): string {
 }
 
 function printHelp(): void {
-  console.log(`t3-code-qqbot v${APP_VERSION} — Cross-platform (Windows & Linux) QQ Bot plugin for T3 Code
+  console.log(`t3-code-qqbot v${APP_VERSION} — 跨平台（Windows & Linux）T3 Code 官方 QQ 机器人插件
 
-Usage:
-  t3-qqbot <command> [options]
-  node dist/cli.mjs <command> [options]
+用法：
+  t3-qqbot <命令> [选项]
+  node dist/cli.mjs <命令> [选项]
 
-Commands:
-  init [--dir <dir>] [--force] [--yes]
-                                     Interactive setup wizard (QR login/credentials, options, binding & auto-start daemon; --yes skips prompts)
-  login [--config <path>]            Scan QR code in terminal to bind QQ Bot (AppID, AppSecret & user_openid)
-  config [show|set <key> <value>] [--config <path>]
-                                     Open interactive config menu (or show / set a single config key)
-  start [--config <path>] [--supervise]
-                                     Run both bridge and QQ gateway together (--supervise auto-restarts on crash)
-  service <install|uninstall|status|start|stop|restart> [--config <path>] [--name <name>]
-                                     Register & manage background daemon (Windows Task Scheduler / Linux systemd)
-  bridge [--config <path>]           Run only the T3 bridge HTTP server
-  gateway [--config <path>]          Run only the QQ official WebSocket gateway
-  bind --scope <c2c:...|group:...> [--workspace <path>] [--thread <threadId>] [--install-media-mcp] [--config <path>]
-                                     Validate and bind a QQ chat/group to a T3 workspace/thread
-  doctor [--config <path>]           Run end-to-end health & connectivity checks
-  recover <runId> [--config <path>]  Recover an interrupted QQ reply delivery for an existing T3 runId
+常用命令：
+  init [--dir <目录>] [--force] [--yes]
+                                     交互式安装向导（扫码/手动填凭据、可选项、绑定与开机自守护；--yes 跳过交互）
+  login [--config <路径>]            终端扫码一键绑定 QQ 机器人（自动获取 AppID、AppSecret 与 user_openid）
+  config [show|set <键> <值>] [--config <路径>]
+                                     打开交互式配置菜单（或直接查看/修改单项配置）
+  start [--config <路径>] [--supervise]
+                                     一键同时启动桥接与 QQ 网关（--supervise 崩溃自动重启）
+  service <install|uninstall|status|start|stop|restart> [--config <路径>] [--name <名称>]
+                                     注册与管理本机后台自守护（Windows 计划任务 / Linux systemd --user）
+  bridge [--config <路径>]           仅启动 T3 桥接 HTTP 服务
+  gateway [--config <路径>]          仅启动 QQ 官方 WebSocket 网关
+  bind --scope <c2c:...|group:...> [--workspace <目录>] [--thread <会话ID>] [--install-media-mcp] [--config <路径>]
+                                     校验并绑定 QQ 会话到 T3 工作区或指定会话
+  doctor [--config <路径>]           执行 6 步全链路体检与连通性测试
+  recover <runId> [--config <路径>]  对已中断回传的指定 T3 runId 补发 QQ 回复
 
-Options:
-  --config <path>   Path to config.json (default: ./config.json or $T3_QQBOT_CONFIG)
-  --help, -h        Show this help
+通用选项：
+  --config <路径>   指定 config.json 路径（默认 ./config.json 或 $T3_QQBOT_CONFIG）
+  --help, -h        显示本帮助信息
 `);
 }
 
