@@ -10,7 +10,7 @@ import type {
   ResolvedPluginConfig,
 } from './types.ts';
 
-export const APP_VERSION = '1.2.3';
+export const APP_VERSION = '1.2.4';
 export const SELF_UPDATE_EXIT_CODE = 75;
 
 export const DEFAULT_ATTACHMENT_HOSTS = [

@@ -57,7 +57,7 @@ t3-qqbot service install
 
 ### 方式二：下载 GitHub Release 离线发布包
 
-从 Releases 下载 `t3-code-qqbot-v1.2.3.zip`（Windows）或 `t3-code-qqbot-v1.2.3.tar.gz`（Linux），解压后执行：
+从 Releases 下载 `t3-code-qqbot-v1.2.4.zip`（Windows）或 `t3-code-qqbot-v1.2.4.tar.gz`（Linux），解压后执行：
 
 ```bash
 npm ci --omit=dev

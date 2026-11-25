@@ -4,6 +4,7 @@ import {
   DEFAULT_LINUX_SERVICE,
   DEFAULT_WINDOWS_TASK,
   renderSystemdUnit,
+  renderWindowsHandoverVbs,
   renderWindowsLauncherVbs,
   sanitizeServiceName,
 } from '../src/service.ts';
@@ -57,4 +58,16 @@ test('renderWindowsLauncherVbs launches node.exe hidden via WScript.Shell.Run(..
       }),
     /Invalid multiline value/,
   );
+});
+
+test('renderWindowsHandoverVbs runs hidden encoded PowerShell command and self-deletes', () => {
+  const vbs = renderWindowsHandoverVbs({
+    psExe: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    encodedCommand: 'QQBCAA==',
+    delayMs: 1200,
+  });
+  assert.match(vbs, /WScript\.Sleep 1200/);
+  assert.match(vbs, /-NoProfile -NonInteractive -EncodedCommand/);
+  assert.match(vbs, /sh\.Run\(cmd, 0, True\)/);
+  assert.match(vbs, /DeleteFile WScript\.ScriptFullName, True/);
 });

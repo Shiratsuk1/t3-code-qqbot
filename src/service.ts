@@ -1,4 +1,5 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -90,6 +91,177 @@ export function renderWindowsLauncherVbs(options: {
 
 function encodeUtf16LeWithBom(content: string): Buffer {
   return Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(content, 'utf16le')]);
+}
+
+export function renderWindowsHandoverVbs(options: {
+  psExe: string;
+  encodedCommand: string;
+  delayMs?: number;
+}): string {
+  const delayMs = Math.max(200, Math.min(10_000, options.delayMs ?? 1_500));
+  return [
+    'Option Explicit',
+    'Dim sh, cmd, exitCode',
+    'Set sh = CreateObject("WScript.Shell")',
+    `WScript.Sleep ${delayMs}`,
+    `cmd = ${vbsStringLiteral(options.psExe)} & " -NoProfile -NonInteractive -EncodedCommand " & ${vbsStringLiteral(options.encodedCommand)}`,
+    'exitCode = sh.Run(cmd, 0, True)',
+    'On Error Resume Next',
+    'CreateObject("Scripting.FileSystemObject").DeleteFile WScript.ScriptFullName, True',
+    'WScript.Quit exitCode',
+    '',
+  ].join('\r\n');
+}
+
+export type LegacyWindowsMigrationResult = {
+  migrated: boolean;
+  migratedTasks: string[];
+  handoverTriggered: boolean;
+};
+
+/**
+ * Automatically upgrades any Windows Scheduled Task still pointing at legacy `state\run-service.ps1`
+ * to the zero-window GUI `wscript.exe` + `state\run-service.vbs` launcher.
+ * When `handover` is true and a legacy powershell.exe wrapper process is currently active,
+ * spawns a detached zero-window wscript handover helper to close the old console host and restart
+ * the upgraded Scheduled Task cleanly.
+ */
+export async function migrateLegacyWindowsServiceTask(options: {
+  cliEntry: string;
+  configPath: string;
+  handover?: boolean;
+  taskNameHint?: string;
+}): Promise<LegacyWindowsMigrationResult> {
+  if (process.platform !== 'win32') {
+    return { migrated: false, migratedTasks: [], handoverTriggered: false };
+  }
+
+  const config = await loadConfig(options.configPath).catch(() => null);
+  if (!config) {
+    return { migrated: false, migratedTasks: [], handoverTriggered: false };
+  }
+
+  const legacyPs1Path = join(config.stateDir, 'run-service.ps1');
+  if (!options.taskNameHint && !existsSync(legacyPs1Path)) {
+    return { migrated: false, migratedTasks: [], handoverTriggered: false };
+  }
+
+  const psSingle = (value: string) => `'${value.replace(/'/g, "''")}'`;
+  const launcherPath = join(config.stateDir, 'run-service.vbs');
+  const logPath = join(config.stateDir, 'service.log');
+  const wscriptExe = join(process.env.WINDIR || 'C:\\Windows', 'System32', 'wscript.exe');
+  const psExe = join(process.env.WINDIR || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+
+  const inspectScript = `
+$ErrorActionPreference = 'Stop'
+$legacy = ${psSingle(legacyPs1Path)}
+$hint = ${psSingle(options.taskNameHint ?? '')}
+$matched = @()
+Get-ScheduledTask -TaskPath '\\' -ErrorAction SilentlyContinue | ForEach-Object {
+  $t = $_
+  $hit = $false
+  foreach ($a in $t.Actions) {
+    $exec = [string]$a.Execute
+    $arg = [string]$a.Arguments
+    if ($arg.IndexOf($legacy, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+      $hit = $true
+    } elseif ($hint -and $t.TaskName -eq $hint -and $exec -match '(powershell|pwsh)(\\.exe)?$' -and $arg -match 'run-service\\.ps1') {
+      $hit = $true
+    }
+  }
+  if ($hit) { $matched += $t.TaskName }
+}
+$hasLegacyProc = $false
+Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
+  if ($_.CommandLine -and $_.CommandLine.IndexOf($legacy, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and $_.ProcessId -ne $PID) {
+    $hasLegacyProc = $true
+  }
+}
+[pscustomobject]@{ tasks = $matched; hasLegacyProc = $hasLegacyProc } | ConvertTo-Json -Compress
+`;
+
+  const { stdout } = await runPsEncoded(inspectScript);
+  const parsed = JSON.parse(stdout.trim() || '{}') as {
+    tasks?: string[] | string;
+    hasLegacyProc?: boolean;
+  };
+  const migratedTasks = Array.isArray(parsed.tasks)
+    ? parsed.tasks.filter(Boolean)
+    : typeof parsed.tasks === 'string' && parsed.tasks
+      ? [parsed.tasks]
+      : [];
+
+  if (migratedTasks.length === 0) {
+    if (existsSync(legacyPs1Path)) {
+      await unlink(legacyPs1Path).catch(() => {});
+    }
+    return { migrated: false, migratedTasks: [], handoverTriggered: false };
+  }
+
+  await mkdir(config.stateDir, { recursive: true });
+  const launcherContent = renderWindowsLauncherVbs({
+    nodePath: process.execPath,
+    cliEntry: options.cliEntry,
+    configPath: config.configPath,
+    workingDir: config.configDir,
+    logPath,
+  });
+  await writeFile(launcherPath, encodeUtf16LeWithBom(launcherContent));
+
+  const taskLiterals = migratedTasks.map(name => psSingle(name)).join(', ');
+  const updateTasksScript = `
+$ErrorActionPreference = 'Stop'
+$wscriptExe = ${psSingle(wscriptExe)}
+$launcher = ${psSingle(launcherPath)}
+$workDir = ${psSingle(config.configDir)}
+$action = New-ScheduledTaskAction -Execute $wscriptExe -Argument "//B //Nologo \`"$launcher\`"" -WorkingDirectory $workDir
+foreach ($taskName in @(${taskLiterals})) {
+  Set-ScheduledTask -TaskName $taskName -Action $action | Out-Null
+}
+`;
+  await runPsEncoded(updateTasksScript);
+  await unlink(legacyPs1Path).catch(() => {});
+
+  let handoverTriggered = false;
+  if (options.handover && parsed.hasLegacyProc) {
+    const primaryTask = migratedTasks[0];
+    const handoverPs = `
+$ErrorActionPreference = 'SilentlyContinue'
+$taskName = ${psSingle(primaryTask)}
+$targets = @(${psSingle(config.configPath)}, ${psSingle(legacyPs1Path)})
+Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe' OR Name='node.exe'" -ErrorAction SilentlyContinue |
+  Where-Object {
+    if (-not $_.CommandLine -or $_.ProcessId -eq $PID) { return $false }
+    foreach ($needle in $targets) {
+      if ($needle -and $_.CommandLine.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return $true
+      }
+    }
+    return $false
+  } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Start-Sleep -Milliseconds 600
+Start-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+`;
+    const encodedHandover = Buffer.from(handoverPs, 'utf16le').toString('base64');
+    const handoverVbsPath = join(config.stateDir, 'migrate-handover.vbs');
+    const handoverVbs = renderWindowsHandoverVbs({
+      psExe,
+      encodedCommand: encodedHandover,
+      delayMs: 1_500,
+    });
+    await writeFile(handoverVbsPath, encodeUtf16LeWithBom(handoverVbs));
+    const child = spawn(wscriptExe, ['//B', '//Nologo', handoverVbsPath], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.unref();
+    handoverTriggered = true;
+  }
+
+  return { migrated: true, migratedTasks, handoverTriggered };
 }
 
 async function runPsEncoded(script: string): Promise<{ stdout: string; stderr: string }> {
@@ -211,6 +383,17 @@ ${stopProcessesScript([absConfig, launcherPath, legacyPs1Path])}
   }
 
   if (action === 'start') {
+    const migrated = await migrateLegacyWindowsServiceTask({
+      cliEntry: options.cliEntry,
+      configPath: options.configPath,
+      taskNameHint: options.taskName,
+      handover: false,
+    }).catch(() => ({ migrated: false, migratedTasks: [] as string[], handoverTriggered: false }));
+    if (migrated.migrated) {
+      console.log(
+        `Upgraded legacy Windows Scheduled Task (${migrated.migratedTasks.join(', ')}) from run-service.ps1 to zero-window wscript launcher.`,
+      );
+    }
     await runPsEncoded(`$ErrorActionPreference='Stop'; Start-ScheduledTask -TaskName ${psSingle(options.taskName)}`);
     console.log(`Started Windows background service "${options.taskName}".`);
     return;

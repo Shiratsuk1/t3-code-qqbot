@@ -3,7 +3,7 @@ import { appendFileSync } from 'node:fs';
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
-import { basename, join, resolve } from 'node:path';
+import { basename, extname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { QQBot, StreamInputState, StreamSession } from '@tencent-connect/qqbot-nodejs';
 import { ApiClient, MessageApi } from '@tencent-connect/qqbot-nodejs/protocol';
@@ -25,6 +25,7 @@ import {
   mimeFromExtension,
   saveAttachment,
 } from './protocol.ts';
+import { migrateLegacyWindowsServiceTask } from './service.ts';
 import {
   createSlashCommandHandler,
   parseSlashCommand,
@@ -822,6 +823,27 @@ export async function runBridgeCli(argv: string[] = process.argv.slice(2)): Prom
   console.info(
     `T3 QQBot bridge listening on http://${config.bridge.host}:${port} (${config.bindings.length} binding(s))`,
   );
+
+  if (process.platform === 'win32') {
+    const currentExt = extname(import.meta.filename) === '.mjs' ? '.mjs' : '.ts';
+    const cliEntry = join(import.meta.dirname, `cli${currentExt}`);
+    void migrateLegacyWindowsServiceTask({
+      cliEntry,
+      configPath: config.configPath,
+      handover: true,
+    })
+      .then(result => {
+        if (result.migrated) {
+          console.info(
+            `Migrated legacy Windows task(s) [${result.migratedTasks.join(', ')}] from run-service.ps1 to zero-window wscript launcher` +
+              (result.handoverTriggered ? '; handing over to zero-window daemon now.' : '.'),
+          );
+        }
+      })
+      .catch(error => {
+        console.warn('Legacy Windows task auto-migration skipped:', error instanceof Error ? error.message : String(error));
+      });
+  }
 
   const shutdown = () => {
     console.info('Shutting down T3 QQBot bridge...');
