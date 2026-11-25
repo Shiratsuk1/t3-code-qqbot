@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { createBridgeRuntime } from '../src/bridge.ts';
+import { createBridgeRuntime, startTypingKeepalive } from '../src/bridge.ts';
 import { parseConfig } from '../src/config.ts';
 
 test('bridge HTTP server enforces auth, validates events, and accepts bound scopes', async () => {
@@ -86,4 +86,34 @@ test('bridge HTTP server enforces auth, validates events, and accepts bound scop
     await runtime.close();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('startTypingKeepalive fires immediately for C2C, refreshes on interval, skips group, and stops cleanly', async () => {
+  const c2cCalls: number[] = [];
+  const stopC2C = startTypingKeepalive(
+    { scope: 'c2c', targetId: 'U1', msgId: 'M1' },
+    async (_target, sec) => {
+      c2cCalls.push(sec);
+    },
+    { durationSec: 60, intervalMs: 25 },
+  );
+  await new Promise(resolve => setTimeout(resolve, 65));
+  stopC2C();
+  const countAtStop = c2cCalls.length;
+  assert.ok(countAtStop >= 2, `expected >=2 typing calls, got ${countAtStop}`);
+  assert.equal(c2cCalls[0], 60);
+  await new Promise(resolve => setTimeout(resolve, 45));
+  assert.equal(c2cCalls.length, countAtStop);
+
+  let groupCalls = 0;
+  const stopGroup = startTypingKeepalive(
+    { scope: 'group', targetId: 'G1', msgId: 'M2' },
+    async () => {
+      groupCalls++;
+    },
+    { intervalMs: 20 },
+  );
+  await new Promise(resolve => setTimeout(resolve, 35));
+  stopGroup();
+  assert.equal(groupCalls, 0);
 });

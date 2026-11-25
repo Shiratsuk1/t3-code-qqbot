@@ -10,7 +10,7 @@ import type {
   ResolvedPluginConfig,
 } from './types.ts';
 
-export const APP_VERSION = '1.2.0';
+export const APP_VERSION = '1.2.1';
 
 export const DEFAULT_ATTACHMENT_HOSTS = [
   'multimedia.nt.qq.com.cn',

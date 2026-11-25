@@ -1,6 +1,6 @@
 {
   "name": "t3-code-qqbot",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Cross-platform (Windows & Linux) QQ Bot bridge and media MCP plugin for T3 Code",
   "license": "MIT",
   "author": "Shiratsuk1",

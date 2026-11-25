@@ -20,7 +20,7 @@ flowchart LR
 - **双平台原生兼容**：支持 Windows 10/11（自动解析 `%USERPROFILE%\.t3\bin\t3.cmd` Electron 包装与独立 `t3.exe`）与 Linux（自动探测 `~/.t3/bin/t3`、`~/.local/bin/t3` 及 `PATH`）。
 - **终端扫码一键接入**：内置 `@tencent-connect/qqbot-connector`，`t3-qqbot init` / `t3-qqbot login` 支持手机 QQ 扫码直接拿到 `AppID`、`AppSecret` 和 `user_openid`，免去手抄密钥。
 - **QQ 聊天内全套斜杠指令面板**：手机端直接发 `/model`（支持 `4n`/`4c`/`4a`/`4h`/`3.8f`/`sonnet`/`opus`/`sol` 等超短简写与跨 Provider 切换）、`/think`、`/provider`、`/new`、`/threads`、`/use`、`/rewind`（`/undo`/`/撤回`）、`/compact`、`/status`、`/tasks`、`/cancel`（`/stop`）、`/update`、`/help`。
-- **原生 T3 协议链路**：直接通过 T3 原生 WebSocket（`message.dispatch` + `orchestration.subscribeThread`）投递与订阅回复，不向聊天正文拼接任何多余标记；私聊支持 QQ 官方 `StreamSession` 实时流式输出，首帧失败自动降级普通消息。
+- **原生 T3 协议链路**：直接通过 T3 原生 WebSocket（`message.dispatch` + `orchestration.subscribeThread`）投递与订阅回复，不向聊天正文拼接任何多余标记；私聊收到消息即显示 QQ 左上角**「对方正在输入…」**并每 50 秒自动续期保活，配合 `StreamSession` 实时流式输出，首帧失败自动降级普通消息。
 - **双向富媒体与附件**：
   - 入站：支持 QQ 图片、语音、普通文件自动下载落盘（HTTPS 域名白名单 + 文件头嗅探 + 单件 12 MiB / 单消息 10 件上限），并通过 T3 原生附件接口上传给模型。
   - 出站：通过独立 MCP 工具 `qqbot_send_media`（`dist/publish.mjs`）从绑定工作区内安全回传图片/文件至当前 QQ 对话，严格拦截路径穿越与 Windows UNC 外联。
@@ -57,7 +57,7 @@ t3-qqbot service install
 
 ### 方式二：下载 GitHub Release 离线发布包
 
-从 Releases 下载 `t3-code-qqbot-v1.2.0.zip`（Windows）或 `t3-code-qqbot-v1.2.0.tar.gz`（Linux），解压后执行：
+从 Releases 下载 `t3-code-qqbot-v1.2.1.zip`（Windows）或 `t3-code-qqbot-v1.2.1.tar.gz`（Linux），解压后执行：
 
 ```bash
 npm ci --omit=dev
@@ -79,7 +79,7 @@ node dist/cli.mjs init
 | `/new` (`/reset`) | `/new 新话题` | 在当前项目开新 T3 会话（自动继承模型与思考强度），旧会话完整保留 |
 | `/threads` (`/list`) | `/threads` | 列出当前项目最近 10 条 T3 会话（带编号） |
 | `/use` (`/switch`) | `/use 2` · `/use main` | 切换到指定历史会话或一键切回配置默认主会话 |
-| `/rewind` (`/undo`, `/撤回`) | `/rewind` · `/撤回 2` | 基于 T3 原生 `fork` 从最近 1-10 轮前安全分支回溯，清除误触发/污染轮次 |
+| `/rewind` (`/undo`, `/撤回`) | `/rewind` · `/撤回 2` · `/rewind 1 --files` | 调用 T3 原生 `checkpoint.rollback` 在当前会话原地撤回最近 1-10 轮（默认仅撤回对话不改文件，加 `--files` 同时还原工作树文件） |
 | `/compact` | `/compact 保留关键结论` | 透传给当前 T3 会话执行原生上下文压缩 |
 | `/status` (`/info`) | `/status` | 查看当前会话 ID、Provider、模型、运行状态与后台任务数 |
 | `/tasks` & `/cancel` (`/stop`) | `/tasks` · `/stop` · `/cancel all` | 查看后台任务，或立即中断当前轮次/取消委派子任务 |

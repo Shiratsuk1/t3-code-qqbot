@@ -25,7 +25,7 @@ import {
   writeActiveThreadOverride,
 } from './slash-commands.ts';
 import { T3Cli } from './t3-cli.ts';
-import { dispatchMessage, readReply, TERMINAL_RUN_STATUSES } from './t3-ws.ts';
+import { dispatchMessage, readReply, rollbackThreadTurns, TERMINAL_RUN_STATUSES } from './t3-ws.ts';
 import type {
   Credentials,
   InboundEvent,
@@ -99,6 +99,35 @@ export type BridgeRuntime = {
     live?: boolean,
   ) => Promise<void>;
 };
+
+export function startTypingKeepalive(
+  reply: ReplyAddress,
+  sendTyping: (target: ReplyAddress, durationSec: number) => Promise<unknown>,
+  options: { durationSec?: number; intervalMs?: number; signal?: AbortSignal } = {},
+): () => void {
+  if (reply.scope !== 'c2c') return () => {};
+  const durationSec = options.durationSec ?? 60;
+  const intervalMs = options.intervalMs ?? 50_000;
+  let stopped = false;
+
+  const fire = () => {
+    if (stopped || options.signal?.aborted) return;
+    void sendTyping(reply, durationSec).catch(() => {});
+  };
+
+  fire();
+  const timer = setInterval(fire, intervalMs);
+  timer.unref?.();
+
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(timer);
+    options.signal?.removeEventListener('abort', stop);
+  };
+  options.signal?.addEventListener('abort', stop, { once: true });
+  return stop;
+}
 
 export async function createBridgeRuntime(
   config: ResolvedPluginConfig,
@@ -211,6 +240,11 @@ export async function createBridgeRuntime(
         threadLocks.delete(binding.scopeHash);
         await writeActiveThreadOverride(root, binding.scopeHash, nextThreadId);
       },
+      rollbackTurns: (threadId, turns, restoreFiles) =>
+        t3Cli.withSession(
+          { scopes: ['orchestration:read', 'orchestration:operate'], ttl: '2m', label: 'T3 QQBot rollback' },
+          token => rollbackThreadTurns(config.t3.origin, token, threadId, { turns, restoreFiles }),
+        ),
       triggerGracefulRestart: () => {
         console.info('Triggering graceful restart after /update...');
         process.kill(process.pid, 'SIGTERM');
@@ -479,60 +513,70 @@ export async function createBridgeRuntime(
       return;
     }
 
-    const uploadedAttachments: NativeAttachment[] = [];
-    let threadId: string;
-    let accepted: { runId: string; sequence: number };
+    const stopTyping = startTypingKeepalive(reply, (target, sec) => qq.sendTyping(target, sec), {
+      durationSec: 60,
+      intervalMs: 50_000,
+      signal: shutdownController.signal,
+    });
+
     try {
-      const attachmentDir = join(binding.workspace, 'attachments', key);
-      const allowedHosts = new Set(config.attachmentHosts);
-      const files: { path: string }[] = [];
-      for (let index = 0; index < rawAttachments.length; index++) {
-        const item = rawAttachments[index];
-        const saved =
-          item.stagedName && config.bridge.testStaging
-            ? await copyStagedAttachment(config.bridge.testStaging, item.stagedName, attachmentDir, index)
-            : await saveAttachment(item, attachmentDir, index, allowedHosts);
-        files.push(saved);
+      const uploadedAttachments: NativeAttachment[] = [];
+      let threadId: string;
+      let accepted: { runId: string; sequence: number };
+      try {
+        const attachmentDir = join(binding.workspace, 'attachments', key);
+        const allowedHosts = new Set(config.attachmentHosts);
+        const files: { path: string }[] = [];
+        for (let index = 0; index < rawAttachments.length; index++) {
+          const item = rawAttachments[index];
+          const saved =
+            item.stagedName && config.bridge.testStaging
+              ? await copyStagedAttachment(config.bridge.testStaging, item.stagedName, attachmentDir, index)
+              : await saveAttachment(item, attachmentDir, index, allowedHosts);
+          files.push(saved);
+        }
+
+        threadId = await resolveThreadForBinding(binding, scope);
+        for (const file of files) {
+          const mime = mimeFromExtension(file.path);
+          uploadedAttachments.push(await observer.upload(file.path, basename(file.path), mime));
+        }
+        accepted = await t3Cli.withSession(
+          { scopes: ['orchestration:read', 'orchestration:operate'], ttl: '2m', label: 'T3 QQBot delivery' },
+          token =>
+            dispatchMessage(config.t3.origin, token, {
+              threadId,
+              key,
+              text: event.content ?? '',
+              attachments: uploadedAttachments,
+            }),
+        );
+      } catch (error) {
+        await unlink(receipt).catch(() => {});
+        for (const att of uploadedAttachments) {
+          await observer.call('t3_attachment_discard', { attachmentId: att.id }).catch(() => {});
+        }
+        await qq.sendText(reply, 'T3 Code 暂时无法处理这条消息，请检查本地 T3 服务与日志。').catch(() => {});
+        throw error;
       }
 
-      threadId = await resolveThreadForBinding(binding, scope);
-      for (const file of files) {
-        const mime = mimeFromExtension(file.path);
-        uploadedAttachments.push(await observer.upload(file.path, basename(file.path), mime));
-      }
-      accepted = await t3Cli.withSession(
-        { scopes: ['orchestration:read', 'orchestration:operate'], ttl: '2m', label: 'T3 QQBot delivery' },
-        token =>
-          dispatchMessage(config.t3.origin, token, {
-            threadId,
-            key,
-            text: event.content ?? '',
-            attachments: uploadedAttachments,
-          }),
-      );
-    } catch (error) {
-      await unlink(receipt).catch(() => {});
-      for (const att of uploadedAttachments) {
-        await observer.call('t3_attachment_discard', { attachmentId: att.id }).catch(() => {});
-      }
-      await qq.sendText(reply, 'T3 Code 暂时无法处理这条消息，请检查本地 T3 服务与日志。').catch(() => {});
-      throw error;
+      const record: PersistedRunRecord = {
+        key,
+        scope,
+        scopeHash: binding.scopeHash,
+        reply,
+        thread: threadId,
+        runId: accepted.runId,
+        workspace: binding.workspace,
+        sequence: accepted.sequence,
+      };
+      await writeFile(join(root, digest(accepted.runId) + '.run.json'), JSON.stringify(record), { mode: 0o600 });
+      timing('dispatch_ack', key, accepted.runId);
+      console.info('T3 accepted', key, threadId, accepted.runId);
+      await observeRun(key, reply, threadId, accepted.runId, accepted.sequence);
+    } finally {
+      stopTyping();
     }
-
-    const record: PersistedRunRecord = {
-      key,
-      scope,
-      scopeHash: binding.scopeHash,
-      reply,
-      thread: threadId,
-      runId: accepted.runId,
-      workspace: binding.workspace,
-      sequence: accepted.sequence,
-    };
-    await writeFile(join(root, digest(accepted.runId) + '.run.json'), JSON.stringify(record), { mode: 0o600 });
-    timing('dispatch_ack', key, accepted.runId);
-    console.info('T3 accepted', key, threadId, accepted.runId);
-    await observeRun(key, reply, threadId, accepted.runId, accepted.sequence);
   }
 
   const checkHealth =

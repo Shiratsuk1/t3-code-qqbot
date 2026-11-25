@@ -96,12 +96,16 @@ test('resolveModelFromInput supports indices, shorthands, effort combos, and cro
   assert.equal(parseThinkingEffort('invalid'), null);
 });
 
-test('parseRewindTurnsArg validates range 1..10', () => {
-  assert.deepEqual(parseRewindTurnsArg(''), { turns: 1 });
-  assert.deepEqual(parseRewindTurnsArg('3'), { turns: 3 });
+test('parseRewindTurnsArg validates range 1..10 and optional --files flag', () => {
+  assert.deepEqual(parseRewindTurnsArg(''), { turns: 1, restoreFiles: false });
+  assert.deepEqual(parseRewindTurnsArg('3'), { turns: 3, restoreFiles: false });
+  assert.deepEqual(parseRewindTurnsArg('--files'), { turns: 1, restoreFiles: true });
+  assert.deepEqual(parseRewindTurnsArg('2 --files'), { turns: 2, restoreFiles: true });
+  assert.deepEqual(parseRewindTurnsArg('--files 2'), { turns: 2, restoreFiles: true });
   assert.ok(parseRewindTurnsArg('0').error);
   assert.ok(parseRewindTurnsArg('11').error);
   assert.ok(parseRewindTurnsArg('abc').error);
+  assert.ok(parseRewindTurnsArg('1 2').error);
 });
 
 test('createSlashCommandHandler executes /model, /think, /new, /threads, /use, /rewind, /stop, and /compact', async () => {
@@ -160,6 +164,7 @@ test('createSlashCommandHandler executes /model, /think, /new, /threads, /use, /
       }),
     } as unknown as Observer;
 
+    const rollbackCalls: { threadId: string; turns: number; restoreFiles: boolean }[] = [];
     const handler = createSlashCommandHandler({
       config: cfg,
       observer: mockObserver,
@@ -169,6 +174,17 @@ test('createSlashCommandHandler executes /model, /think, /new, /threads, /use, /
       },
       resolveActiveThread: async b => (await readActiveThreadOverride(cfg.stateDir, b.scopeHash)) ?? b.threadId!,
       setActiveThreadOverride: (b, id) => writeActiveThreadOverride(cfg.stateDir, b.scopeHash, id),
+      rollbackTurns: async (threadId, turns, restoreFiles) => {
+        rollbackCalls.push({ threadId, turns, restoreFiles });
+        return {
+          threadId,
+          rolledBackTurns: turns,
+          remainingTurns: 2,
+          targetOrdinal: 2,
+          checkpointId: 'cp-2',
+          restoreFiles,
+        };
+      },
     });
 
     assert.equal(await handler({ name: 'help', args: '' }, binding, 'c2c:U1'), 'handled');
@@ -190,7 +206,9 @@ test('createSlashCommandHandler executes /model, /think, /new, /threads, /use, /
     assert.equal(await readActiveThreadOverride(cfg.stateDir, binding.scopeHash), 'thread-main');
 
     assert.equal(await handler({ name: 'rewind', args: '1' }, binding, 'c2c:U1'), 'handled');
-    assert.equal(await readActiveThreadOverride(cfg.stateDir, binding.scopeHash), 'thread-rewound-1');
+    assert.deepEqual(rollbackCalls, [{ threadId: 'thread-main', turns: 1, restoreFiles: false }]);
+    assert.equal(await readActiveThreadOverride(cfg.stateDir, binding.scopeHash), 'thread-main');
+    assert.match(replies.at(-1)!, /原地撤回最近 1 轮/);
 
     assert.equal(await handler({ name: 'use', args: 'main' }, binding, 'c2c:U1'), 'handled');
     assert.equal(await readActiveThreadOverride(cfg.stateDir, binding.scopeHash), undefined);

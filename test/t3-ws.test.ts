@@ -3,7 +3,13 @@ import { createServer } from 'node:http';
 import test from 'node:test';
 import { WebSocketServer } from 'ws';
 import { Observer } from '../src/observe.ts';
-import { dispatchMessage, readReply } from '../src/t3-ws.ts';
+import {
+  dispatchMessage,
+  planCheckpointRollback,
+  readReply,
+  rollbackThreadTurns,
+} from '../src/t3-ws.ts';
+import type { ThreadRollbackProjection } from '../src/t3-ws.ts';
 
 test('dispatchMessage and readReply stream text and exclude foreground completed subagents from backgroundTaskIds', async () => {
   const server = createServer();
@@ -230,6 +236,160 @@ test('Observer reconnects and retries once on HTTP 401 session expiration', asyn
     assert.equal(toolCalls, 2);
   } finally {
     await observer.close();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test('planCheckpointRollback handles baseline, multi-turn, consecutive rollback, active run guard, and --files check', () => {
+  const baseProjection: ThreadRollbackProjection = {
+    thread: { activeProviderThreadId: 'pt-1' },
+    runs: [
+      { id: 'run-4', ordinal: 4, status: 'completed' },
+      { id: 'run-5', ordinal: 5, status: 'completed' },
+      { id: 'run-6', ordinal: 6, status: 'completed' },
+    ],
+    checkpointScopes: [{ id: 'scope-root', providerThreadId: 'pt-1', kind: 'root_run' }],
+    checkpoints: [
+      { id: 'cp-0', scopeId: 'scope-root', runId: null, ordinalWithinScope: 0, appRunOrdinal: null, status: 'missing' },
+      { id: 'cp-4', scopeId: 'scope-root', runId: 'run-4', ordinalWithinScope: 4, appRunOrdinal: 4, status: 'missing' },
+      { id: 'cp-5', scopeId: 'scope-root', runId: 'run-5', ordinalWithinScope: 5, appRunOrdinal: 5, status: 'missing' },
+      { id: 'cp-6', scopeId: 'scope-root', runId: 'run-6', ordinalWithinScope: 6, appRunOrdinal: 6, status: 'missing' },
+    ],
+  };
+
+  // Rewind 1 turn in conversation-only mode works even when checkpoints are 'missing'
+  const r1 = planCheckpointRollback(baseProjection, 1, false);
+  assert.deepEqual(r1.plan, {
+    scopeId: 'scope-root',
+    checkpointId: 'cp-5',
+    targetOrdinal: 5,
+    rolledBackTurns: 1,
+    remainingTurns: 2,
+    latestRolledBackRunId: 'run-6',
+  });
+
+  // Rewind all 3 turns goes to baseline (appRunOrdinal: null)
+  const r3 = planCheckpointRollback(baseProjection, 3, false);
+  assert.equal(r3.plan?.checkpointId, 'cp-0');
+  assert.equal(r3.plan?.targetOrdinal, 0);
+  assert.equal(r3.plan?.remainingTurns, 0);
+
+  // Consecutive rewind after run-6 was rolled_back and cp-6 became stale
+  const afterOne: ThreadRollbackProjection = {
+    ...baseProjection,
+    runs: [
+      { id: 'run-4', ordinal: 4, status: 'completed' },
+      { id: 'run-5', ordinal: 5, status: 'completed' },
+      { id: 'run-6', ordinal: 6, status: 'rolled_back' },
+    ],
+    checkpoints: [
+      { id: 'cp-0', scopeId: 'scope-root', runId: null, ordinalWithinScope: 0, appRunOrdinal: null, status: 'missing' },
+      { id: 'cp-4', scopeId: 'scope-root', runId: 'run-4', ordinalWithinScope: 4, appRunOrdinal: 4, status: 'missing' },
+      { id: 'cp-5', scopeId: 'scope-root', runId: 'run-5', ordinalWithinScope: 5, appRunOrdinal: 5, status: 'missing' },
+      { id: 'cp-6', scopeId: 'scope-root', runId: 'run-6', ordinalWithinScope: 6, appRunOrdinal: 6, status: 'stale' },
+    ],
+  };
+  const rNext = planCheckpointRollback(afterOne, 1, false);
+  assert.equal(rNext.plan?.checkpointId, 'cp-4');
+  assert.equal(rNext.plan?.latestRolledBackRunId, 'run-5');
+  assert.equal(rNext.plan?.remainingTurns, 1);
+
+  // Single-turn thread can also rewind to baseline
+  const singleTurn: ThreadRollbackProjection = {
+    thread: { activeProviderThreadId: 'pt-1' },
+    runs: [{ id: 'run-1', ordinal: 1, status: 'completed' }],
+    checkpointScopes: [{ id: 'scope-root', providerThreadId: 'pt-1', kind: 'root_run' }],
+    checkpoints: [
+      { id: 'cp-0', scopeId: 'scope-root', runId: null, ordinalWithinScope: 0, appRunOrdinal: null, status: 'ready' },
+      { id: 'cp-1', scopeId: 'scope-root', runId: 'run-1', ordinalWithinScope: 1, appRunOrdinal: 1, status: 'ready' },
+    ],
+  };
+  const rSingle = planCheckpointRollback(singleTurn, 1, false);
+  assert.equal(rSingle.plan?.checkpointId, 'cp-0');
+  assert.equal(rSingle.plan?.remainingTurns, 0);
+
+  // --files rejected when checkpoints are 'missing'
+  const rFilesMissing = planCheckpointRollback(baseProjection, 1, true);
+  assert.match(rFilesMissing.error ?? '', /文件快照/);
+
+  // Active running turn blocked with /stop hint
+  const runningProj: ThreadRollbackProjection = {
+    ...baseProjection,
+    runs: [...baseProjection.runs, { id: 'run-7', ordinal: 7, status: 'running' }],
+  };
+  assert.match(planCheckpointRollback(runningProj, 1, false).error ?? '', /\/stop/);
+});
+
+test('rollbackThreadTurns dispatches native checkpoint.rollback and waits for rolled_back confirmation', async () => {
+  const server = createServer();
+  const wss = new WebSocketServer({ server });
+
+  let rolledBack = false;
+  let dispatchedCommand: any = null;
+  let pollCount = 0;
+
+  wss.on('connection', socket => {
+    socket.on('message', raw => {
+      const msg = JSON.parse(raw.toString());
+      if (msg._tag === 'Request' && msg.tag === 'orchestration.getThreadProjection') {
+        pollCount++;
+        if (dispatchedCommand && pollCount >= 3) rolledBack = true;
+        socket.send(
+          JSON.stringify({
+            _tag: 'Exit',
+            requestId: msg.id,
+            exit: {
+              _tag: 'Success',
+              value: {
+                thread: { activeProviderThreadId: 'pt-1', rollbackFailure: null },
+                runs: [
+                  { id: 'run-1', ordinal: 1, status: 'completed' },
+                  { id: 'run-2', ordinal: 2, status: rolledBack ? 'rolled_back' : 'completed' },
+                ],
+                checkpointScopes: [{ id: 'scope-root', providerThreadId: 'pt-1', kind: 'root_run' }],
+                checkpoints: [
+                  { id: 'cp-0', scopeId: 'scope-root', runId: null, ordinalWithinScope: 0, appRunOrdinal: null, status: 'missing' },
+                  { id: 'cp-1', scopeId: 'scope-root', runId: 'run-1', ordinalWithinScope: 1, appRunOrdinal: 1, status: 'missing' },
+                  { id: 'cp-2', scopeId: 'scope-root', runId: 'run-2', ordinalWithinScope: 2, appRunOrdinal: 2, status: rolledBack ? 'stale' : 'missing' },
+                ],
+              },
+            },
+          }),
+        );
+      } else if (msg._tag === 'Request' && msg.tag === 'orchestration.dispatchCommand') {
+        dispatchedCommand = msg.payload;
+        socket.send(
+          JSON.stringify({
+            _tag: 'Exit',
+            requestId: msg.id,
+            exit: { _tag: 'Success', value: { sequence: 99 } },
+          }),
+        );
+      }
+    });
+  });
+
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const addr = server.address();
+  assert.ok(addr && typeof addr === 'object');
+  const origin = `http://127.0.0.1:${addr.port}`;
+
+  try {
+    const res = await rollbackThreadTurns(origin, 'tok-rb', 'thread-1', {
+      turns: 1,
+      restoreFiles: false,
+      pollIntervalMs: 20,
+      timeoutMs: 5_000,
+    });
+    assert.equal(dispatchedCommand?.type, 'checkpoint.rollback');
+    assert.equal(dispatchedCommand?.scopeId, 'scope-root');
+    assert.equal(dispatchedCommand?.checkpointId, 'cp-1');
+    assert.equal(dispatchedCommand?.restoreFiles, false);
+    assert.equal(res.rolledBackTurns, 1);
+    assert.equal(res.remainingTurns, 1);
+    assert.equal(res.targetOrdinal, 1);
+  } finally {
+    wss.close();
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
 });

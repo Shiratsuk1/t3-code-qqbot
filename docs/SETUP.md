@@ -96,14 +96,14 @@ mkdir -p ~/t3-qqbot && cd ~/t3-qqbot
 
 - **Windows（PowerShell）**：
   ```powershell
-  Expand-Archive -Path .\t3-code-qqbot-v1.2.0.zip -DestinationPath C:\Tools\
-  cd C:\Tools\t3-code-qqbot-v1.2.0
+  Expand-Archive -Path .\t3-code-qqbot-v1.2.1.zip -DestinationPath C:\Tools\
+  cd C:\Tools\t3-code-qqbot-v1.2.1
   npm ci --omit=dev
   ```
 - **Linux（Bash）**：
   ```bash
   mkdir -p ~/t3-code-qqbot
-  tar -xzf t3-code-qqbot-v1.2.0.tar.gz -C ~/t3-code-qqbot --strip-components=1
+  tar -xzf t3-code-qqbot-v1.2.1.tar.gz -C ~/t3-code-qqbot --strip-components=1
   cd ~/t3-code-qqbot
   npm ci --omit=dev
   ```

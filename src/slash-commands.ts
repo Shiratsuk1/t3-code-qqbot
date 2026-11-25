@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { APP_VERSION, samePath } from './config.ts';
 import type { Observer, ProjectListItem } from './observe.ts';
+import type { RollbackResult } from './t3-ws.ts';
 import type { ResolvedBinding, ResolvedPluginConfig } from './types.ts';
 
 const execFileAsync = promisify(execFile);
@@ -181,21 +182,33 @@ export function parseThinkingEffort(raw: string | undefined): ThinkingEffort | n
 export function parseRewindTurnsArg(
   rawArg: string | undefined,
   maxTurns = MAX_REWIND_TURNS,
-): { turns?: number; error?: string } {
+): { turns?: number; restoreFiles?: boolean; error?: string } {
   const cleaned = rawArg?.trim() ?? '';
-  if (!cleaned) return { turns: 1 };
-  if (!/^\d+$/.test(cleaned)) {
+  if (!cleaned) return { turns: 1, restoreFiles: false };
+  const tokens = cleaned.split(/\s+/).filter(Boolean);
+  let restoreFiles = false;
+  const positional: string[] = [];
+  for (const token of tokens) {
+    const low = token.toLowerCase();
+    if (low === '--files' || low === '-f' || low === 'files' || low === '文件') {
+      restoreFiles = true;
+    } else {
+      positional.push(token);
+    }
+  }
+  if (positional.length === 0) return { turns: 1, restoreFiles };
+  if (positional.length > 1 || !/^\d+$/.test(positional[0])) {
     return {
-      error: `无效的撤回轮数 "${cleaned}"。请使用正整数（1-${maxTurns}），例如 /rewind 或 /undo 2。`,
+      error: `无效的撤回参数 "${cleaned}"。请使用正整数（1-${maxTurns}），例如 /rewind、/撤回 2 或 /rewind 1 --files。`,
     };
   }
-  const turns = Number.parseInt(cleaned, 10);
+  const turns = Number.parseInt(positional[0], 10);
   if (!Number.isSafeInteger(turns) || turns < 1 || turns > maxTurns) {
     return {
-      error: `单次撤回轮数范围为 1-${maxTurns}，收到 ${cleaned}。发送 /rewind 默认撤回上一轮。`,
+      error: `单次撤回轮数范围为 1-${maxTurns}，收到 ${positional[0]}。发送 /rewind 默认撤回上一轮。`,
     };
   }
-  return { turns };
+  return { turns, restoreFiles };
 }
 
 export function formatSlashHelpText(): string {
@@ -210,7 +223,7 @@ export function formatSlashHelpText(): string {
     '• /new [标题] — 在当前项目开新 T3 会话（自动保留模型与强度，别名 /reset）',
     '• /threads — 列出当前项目最近 10 条 T3 会话（别名 /list）',
     '• /use <编号|threadId|main> — 切换到指定历史会话或切回主会话（别名 /switch）',
-    '• /rewind [轮数] — 从最近 1-10 轮前安全分支回溯，清除误触发/污染轮次（别名 /undo、/撤回）',
+    '• /rewind [轮数] [--files] — 调用 T3 原生检查点原地撤回最近 1-10 轮（别名 /undo、/撤回；默认仅撤回对话，加 --files 同时还原文件）',
     '• /compact [保留重点] — 透传给当前 T3 会话执行原生上下文压缩',
     '• /status — 查看当前会话 ID、Provider、模型档位、运行状态与后台任务（别名 /info）',
     '• /tasks & /cancel [taskId|all] — 查看后台任务，或中断当前轮次/取消子任务（别名 /stop）',
@@ -395,6 +408,7 @@ export type SlashHandlerDeps = {
   sendReply: (text: string) => Promise<void>;
   resolveActiveThread: (binding: ResolvedBinding, scope: string) => Promise<string>;
   setActiveThreadOverride: (binding: ResolvedBinding, threadId: string | null) => Promise<void>;
+  rollbackTurns: (threadId: string, turns: number, restoreFiles: boolean) => Promise<RollbackResult>;
   triggerGracefulRestart?: () => void;
 };
 
@@ -718,33 +732,12 @@ export function createSlashCommandHandler(deps: SlashHandlerDeps) {
         return 'handled';
       }
       const turns = parsed.turns ?? 1;
-      const snap = await deps.observer.read(threadId);
-      const runs = snap.recentRuns ?? [];
-      if (runs.length <= turns) {
-        await deps.sendReply(
-          `当前会话仅有 ${runs.length} 条可回溯记录，无法撤回 ${turns} 轮。若想完全清空上下文，请发送 /new。`,
-        );
-        return 'handled';
-      }
-      // recentRuns is newest-first in T3 thread_read
-      const targetRun = runs[turns];
-      if (!targetRun?.runId) {
-        await deps.sendReply('无法定位回溯目标轮次，请改用 /new 开启干净会话。');
-        return 'handled';
-      }
-      const forked = await deps.observer.call<{ threadId?: string; targetThreadId?: string }>('t3_thread_transfer', {
-        action: 'fork',
-        threadId,
-        sourcePoint: { type: 'run', runId: targetRun.runId },
-        title: `QQ Rewind (-${turns}轮)`,
-      });
-      const newThreadId = forked.threadId ?? forked.targetThreadId;
-      if (!newThreadId) {
-        throw new Error('T3 分支回溯未返回新会话 ID');
-      }
-      await deps.setActiveThreadOverride(binding, newThreadId);
+      const restoreFiles = parsed.restoreFiles ?? false;
+      const res = await deps.rollbackTurns(threadId, turns, restoreFiles);
+      const modeLabel = res.restoreFiles ? '对话 + 工作区文件' : '仅对话上下文（不改动工作区文件）';
+      const targetDesc = res.targetOrdinal === 0 ? '会话起点' : `第 ${res.targetOrdinal} 轮结束位置`;
       await deps.sendReply(
-        `已安全回溯最近 ${turns} 轮（基于轮次 ${targetRun.runId} 创建干净分支并自动切换）：\n• 新会话 ID：${newThreadId}\n（原会话保留在 T3 中未删除，发 /use main 可切回）`,
+        `已在当前 T3 会话原地撤回最近 ${res.rolledBackTurns} 轮：\n• 回溯位置：${targetDesc}\n• 撤回模式：${modeLabel}\n• 剩余有效轮次：${res.remainingTurns} 轮`,
       );
       return 'handled';
     }
