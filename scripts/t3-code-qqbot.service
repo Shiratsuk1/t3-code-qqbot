@@ -1,0 +1,21 @@
+# Example systemd user service for Linux
+# Copy to ~/.config/systemd/user/t3-code-qqbot.service
+# Replace /opt/t3-code-qqbot and /usr/bin/node with your actual paths, then run:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now t3-code-qqbot.service
+#   sudo loginctl enable-linger "$USER"
+
+[Unit]
+Description=T3 Code QQBot Bridge and Official WebSocket Gateway
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/t3-code-qqbot
+Environment=NODE_NO_WARNINGS=1
+ExecStart=/usr/bin/node /opt/t3-code-qqbot/dist/cli.mjs start --config /opt/t3-code-qqbot/config.json
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

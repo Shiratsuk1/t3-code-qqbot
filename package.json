@@ -1,0 +1,67 @@
+{
+  "name": "t3-code-qqbot",
+  "version": "1.0.0",
+  "description": "Cross-platform (Windows & Linux) QQ Bot bridge and media MCP plugin for T3 Code",
+  "license": "MIT",
+  "author": "Shiratsuk1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Shiratsuk1/t3-code-qqbot.git"
+  },
+  "homepage": "https://github.com/Shiratsuk1/t3-code-qqbot#readme",
+  "bugs": {
+    "url": "https://github.com/Shiratsuk1/t3-code-qqbot/issues"
+  },
+  "keywords": [
+    "t3code",
+    "t3-code",
+    "qqbot",
+    "qq-bot",
+    "mcp",
+    "ai-agent",
+    "bridge",
+    "windows",
+    "linux"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "bin": {
+    "t3-qqbot": "./dist/cli.mjs"
+  },
+  "files": [
+    "dist/*.mjs",
+    "docs/SETUP.md",
+    "scripts/start-windows.ps1",
+    "scripts/install-windows-task.ps1",
+    "scripts/t3-code-qqbot.service",
+    "config.example.json",
+    "credentials.example.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "node scripts/build.mjs",
+    "package": "node scripts/build.mjs --package",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build",
+    "test": "node --test test/*.test.ts",
+    "start": "node dist/cli.mjs start",
+    "bridge": "node dist/cli.mjs bridge",
+    "gateway": "node dist/cli.mjs gateway",
+    "recover": "node dist/cli.mjs recover",
+    "doctor": "node dist/cli.mjs doctor"
+  },
+  "dependencies": {
+    "@tencent-connect/qqbot-nodejs": "1.0.5",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.0"
+  }
+}
