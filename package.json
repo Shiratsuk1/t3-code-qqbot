@@ -6,7 +6,7 @@
   "author": "Shiratsuk1",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Shiratsuk1/t3-code-qqbot.git"
+    "url": "git+https://github.com/Shiratsuk1/t3-code-qqbot.git"
   },
   "homepage": "https://github.com/Shiratsuk1/t3-code-qqbot#readme",
   "bugs": {
@@ -28,7 +28,7 @@
     "node": ">=24.0.0"
   },
   "bin": {
-    "t3-qqbot": "./dist/cli.mjs"
+    "t3-qqbot": "dist/cli.mjs"
   },
   "files": [
     "dist/*.mjs",
