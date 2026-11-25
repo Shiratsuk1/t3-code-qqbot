@@ -10,7 +10,7 @@ import type {
   ResolvedPluginConfig,
 } from './types.ts';
 
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.1.0';
 
 export const DEFAULT_ATTACHMENT_HOSTS = [
   'multimedia.nt.qq.com.cn',
@@ -144,12 +144,14 @@ export function parseConfig(raw: RawPluginConfig, configPath: string): ResolvedP
       prefix: Array.isArray(raw.t3.prefix) ? raw.t3.prefix.map(String) : [],
       env: raw.t3.env && typeof raw.t3.env === 'object' ? { ...raw.t3.env } : {},
       home: raw.t3.home ? resolveRelative(configDir, raw.t3.home) : undefined,
+      muteMobileCompletionThreadId: raw.t3.muteMobileCompletionThreadId?.trim() || undefined,
     },
     bridge: {
       host,
       port,
       proactiveBackgroundReports: Boolean(raw.bridge?.proactiveBackgroundReports),
       maxMessageChars,
+      autoSettleThread: Boolean(raw.bridge?.autoSettleThread),
       testStaging: raw.bridge?.testStaging ? resolveRelative(configDir, raw.bridge.testStaging) : undefined,
     },
     gateway: {

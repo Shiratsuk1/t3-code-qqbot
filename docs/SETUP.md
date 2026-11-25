@@ -96,14 +96,14 @@ mkdir -p ~/t3-qqbot && cd ~/t3-qqbot
 
 - **Windows（PowerShell）**：
   ```powershell
-  Expand-Archive -Path .\t3-code-qqbot-v1.0.0.zip -DestinationPath C:\Tools\
-  cd C:\Tools\t3-code-qqbot-v1.0.0
+  Expand-Archive -Path .\t3-code-qqbot-v1.1.0.zip -DestinationPath C:\Tools\
+  cd C:\Tools\t3-code-qqbot-v1.1.0
   npm ci --omit=dev
   ```
 - **Linux（Bash）**：
   ```bash
   mkdir -p ~/t3-code-qqbot
-  tar -xzf t3-code-qqbot-v1.0.0.tar.gz -C ~/t3-code-qqbot --strip-components=1
+  tar -xzf t3-code-qqbot-v1.1.0.tar.gz -C ~/t3-code-qqbot --strip-components=1
   cd ~/t3-code-qqbot
   npm ci --omit=dev
   ```
@@ -112,19 +112,33 @@ mkdir -p ~/t3-qqbot && cd ~/t3-qqbot
 
 ---
 
-## 4. 初始化配置与填写凭据
+## 4. 交互式安装向导与配置菜单
 
-运行内置初始化命令：
+直接运行初始化向导（会自动探测本机 T3 Code，并按步骤询问 QQ 凭据、端口、群聊 `@`、回复后自动收起侧边栏、可选补丁静音线程 ID、可选立即绑定以及**是否一键注册开机自启与后台自守护**）：
 
 ```bash
 t3-qqbot init
 ```
 
-该命令会在当前目录生成两份文件：
-1. `config.json`：主配置文件（默认配置 `t3.executable: "auto"`，自动识别 Windows `t3.cmd` 或 Linux `t3`）。
-2. `credentials.json`：敏感凭据文件（已自动生成 64 位随机十六进制 `bridgeSecret`）。
+- 自动化脚本或无需交互时，加 `--yes`（或 `-y`）直接生成默认配置：`t3-qqbot init --yes`。
+- 以后随时想改任何一项配置，运行 `t3-qqbot config` 即可再次打开完整交互式配置菜单：
+- `[1]` QQ Bot 凭据（`AppID` / `AppSecret` / 重新生成随机 `bridgeSecret`）
+- `[2]` T3 Code 连接（`t3.origin` / `t3.executable` / `t3.home`）
+- `[3]` 桥接与网关参数（端口 / 单条字数上限 / 群聊 `@` / 指令前缀）
+- `[4]` QQ 会话绑定管理（自动读取 T3 已注册项目列表按编号选择）
+- `[5]` 附件域名白名单
+- `[6]` 一键安装与管理后台自守护服务
+- `[7]` 可选主会话侧边栏收纳（`autoSettleThread`）与补丁版静音线程 ID 导出
+- `[8]` 运行 6 步全链路体检（`doctor`）
 
-编辑 `credentials.json`，填入第 2 步从 QQ 开放平台拿到的 `appId` 和 `appSecret`：
+也可使用非交互命令快捷修改单项配置：
+```bash
+t3-qqbot config show
+t3-qqbot config set bridge.port 18774
+t3-qqbot config set bridge.autoSettleThread true
+```
+
+若习惯直接手动编辑 `credentials.json`，填入第 2 步从 QQ 开放平台拿到的 `appId` 和 `appSecret`：
 
 ```json
 {
@@ -270,46 +284,26 @@ t3-qqbot start
 
 ---
 
-## 9. 配置后台常驻与开机自启
+## 9. 一键配置后台自守护与开机自启（推荐）
 
-### Windows：注册计划任务（登录后无黑框静默运行）
+插件内置跨平台守护服务管理命令，**无需手动编写或修改服务文件**，Windows 与 Linux 统一执行同一条命令即可：
 
-使用发布包或克隆目录中的 `scripts\install-windows-task.ps1`（它会自动校验 Node 24+，并通过 `scripts\start-windows.ps1` 在隐藏窗口下将全部输出落盘到 `state\service.log`）：
+```bash
+# 一键注册开机自启并立即在后台启动
+t3-qqbot service install
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install-windows-task.ps1 -ConfigPath .\config.json
-Start-ScheduledTask -TaskName 'T3 Code QQBot'
+# 常用管理命令
+t3-qqbot service status
+t3-qqbot service restart
+t3-qqbot service stop
+t3-qqbot service uninstall
 ```
 
-查看状态、日志与停止：
-```powershell
-Get-ScheduledTask -TaskName 'T3 Code QQBot'
-# 查看汇总日志 / 桥接日志 / 网关日志
-Get-Content .\state\service.log -Tail 50 -Wait
-Get-Content .\state\bridge.log -Tail 50 -Wait
-Get-Content .\state\gateway.log -Tail 50 -Wait
-# 停止服务
-Stop-ScheduledTask -TaskName 'T3 Code QQBot'
-```
+底层行为：
+- **Windows**：在当前用户下免管理员权限注册 Windows 计划任务（`T3 Code QQBot`），通过隐藏 PowerShell 包装启动 `t3-qqbot start --supervise`，无黑框弹窗、崩溃自动指数退避拉起，全部日志落盘至 `state\service.log`、`state\bridge.log` 与 `state\gateway.log`。执行 `t3-qqbot service stop` / `uninstall` 时会自动一并清理子进程，不留端口占用残留。
+- **Linux**：自动生成并启用 `~/.config/systemd/user/t3-code-qqbot.service`（含 `Restart=always`、`RestartSec=5`、`KillMode=control-group`）。如需在退出 SSH 后持续运行，按安装完成时的提示执行一次 `sudo loginctl enable-linger "$USER"` 即可；日志通过 `journalctl --user -u t3-code-qqbot.service -f` 查看。
 
-### Linux：配置 `systemd --user` 常驻服务
-
-1. 复制服务模板并修改其中的绝对路径与 `node` 路径（用 `which node` 查看）：
-   ```bash
-   mkdir -p ~/.config/systemd/user
-   cp scripts/t3-code-qqbot.service ~/.config/systemd/user/t3-code-qqbot.service
-   nano ~/.config/systemd/user/t3-code-qqbot.service
-   ```
-2. 启用并启动（如希望退出 SSH 后保持运行，同时开启 `linger`）：
-   ```bash
-   systemctl --user daemon-reload
-   systemctl --user enable --now t3-code-qqbot.service
-   sudo loginctl enable-linger "$USER"
-   ```
-3. 查看实时日志：
-   ```bash
-   journalctl --user -u t3-code-qqbot.service -f
-   ```
+*(仓库 `scripts/` 目录下仍保留手工脚本模板 `install-windows-task.ps1` 与 `t3-code-qqbot.service` 供定制参考。)*
 
 ---
 
@@ -358,6 +352,8 @@ Stop-ScheduledTask -TaskName 'T3 Code QQBot'
 | `t3.home` | `$T3CODE_HOME` 或 `~/.t3` | 自定义 T3 Code 数据目录 |
 | `bridge.maxMessageChars` | `1600` | 单条 QQ 回复最大字符数（范围 `100`~`4000`，超出自动分段） |
 | `bridge.proactiveBackgroundReports` | `false` | 异步子任务超过 QQ 被动回复窗口时是否使用主动消息推送（需账号具备权限） |
+| `bridge.autoSettleThread` | `false` | 每轮回复结束后自动调用 `t3_thread_organize(settle)` 收起 T3 侧边栏活跃状态（官方 T3 直接支持；不屏蔽手机完成推送） |
+| `t3.muteMobileCompletionThreadId` | 省略 | 可选主会话 `threadId`，用于在配置菜单导出 `T3CODE_MUTE_MOBILE_COMPLETION_THREAD_ID`（需配合支持该环境变量的补丁/自编译 T3 服务端，官方原版暂未内置） |
 | `gateway.requireMentionInGroup` | `true` | 群聊是否要求 `@机器人` 才转发 |
 | `gateway.stripPrefix` | `""` | 可选指令前缀过滤（如设 `"/ai"` 则自动剥离消息开头的 `/ai`） |
 | `bindings[].modelSelection` | 省略 | 自动新建线程时指定的默认模型，如 `{ "provider": "...", "model": "..." }` |

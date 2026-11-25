@@ -57,6 +57,8 @@ export type T3Config = {
   prefix?: string[];
   env?: Record<string, string>;
   home?: string;
+  /** Optional thread ID exported as T3CODE_MUTE_MOBILE_COMPLETION_THREAD_ID (requires patched/supporting T3 server). */
+  muteMobileCompletionThreadId?: string;
 };
 
 export type BridgeConfig = {
@@ -64,6 +66,7 @@ export type BridgeConfig = {
   port: number;
   proactiveBackgroundReports?: boolean;
   maxMessageChars?: number;
+  autoSettleThread?: boolean;
   testStaging?: string;
 };
 
@@ -102,12 +105,14 @@ export type ResolvedPluginConfig = {
     prefix: string[];
     env: Record<string, string>;
     home?: string;
+    muteMobileCompletionThreadId?: string;
   };
   bridge: {
     host: string;
     port: number;
     proactiveBackgroundReports: boolean;
     maxMessageChars: number;
+    autoSettleThread: boolean;
     testStaging?: string;
   };
   gateway: {

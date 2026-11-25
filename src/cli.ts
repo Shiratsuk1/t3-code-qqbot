@@ -1,26 +1,26 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
-import { access, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, extname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
   APP_VERSION,
-  DEFAULT_ATTACHMENT_HOSTS,
   isMainModule,
   loadConfig,
   loadCredentials,
   samePath,
   scopeToHash,
 } from './config.ts';
+import { runConfigMenu, runConfigSet, runConfigShow, runInitWizard } from './menu.ts';
 import { Observer } from './observe.ts';
 import type { ProjectListItem } from './observe.ts';
 import { digest } from './protocol.ts';
-import { resolveT3Command, T3Cli } from './t3-cli.ts';
+import { runServiceCommand } from './service.ts';
+import { T3Cli } from './t3-cli.ts';
 import type { RawPluginConfig } from './types.ts';
 
-const BOOLEAN_FLAGS = new Set(['help', 'force', 'install-media-mcp']);
+const BOOLEAN_FLAGS = new Set(['help', 'force', 'install-media-mcp', 'supervise', 'yes']);
 
 export function parseArgs(argv: string[]) {
   const positional: string[] = [];
@@ -29,6 +29,10 @@ export function parseArgs(argv: string[]) {
     const token = argv[i];
     if (token === '-h') {
       flags.set('help', true);
+      continue;
+    }
+    if (token === '-y') {
+      flags.set('yes', true);
       continue;
     }
     if (token.startsWith('--')) {
@@ -69,8 +73,14 @@ Usage:
   node dist/cli.mjs <command> [options]
 
 Commands:
-  init [--dir <dir>] [--force]       Create config.json & credentials.json with a random bridgeSecret
-  start [--config <path>]            Run both bridge and QQ gateway together (recommended for single-host)
+  init [--dir <dir>] [--force] [--yes]
+                                     Interactive setup wizard (credentials, options, binding & auto-start daemon; --yes skips prompts)
+  config [show|set <key> <value>] [--config <path>]
+                                     Open interactive config menu (or show / set a single config key)
+  start [--config <path>] [--supervise]
+                                     Run both bridge and QQ gateway together (--supervise auto-restarts on crash)
+  service <install|uninstall|status|start|stop|restart> [--config <path>] [--name <name>]
+                                     Register & manage background daemon (Windows Task Scheduler / Linux systemd)
   bridge [--config <path>]           Run only the T3 bridge HTTP server
   gateway [--config <path>]          Run only the QQ official WebSocket gateway
   bind --scope <c2c:...|group:...> [--workspace <path>] [--thread <threadId>] [--install-media-mcp] [--config <path>]
@@ -84,73 +94,23 @@ Options:
 `);
 }
 
-async function fileExists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function cmdInit(flags: Map<string, string | boolean>): Promise<void> {
   const dir = resolve(typeof flags.get('dir') === 'string' ? String(flags.get('dir')) : process.cwd());
-  await mkdir(dir, { recursive: true });
-  const configPath = join(dir, 'config.json');
-  const credsPath = join(dir, 'credentials.json');
-  const force = flags.get('force') === true;
-
-  if (!force && (await fileExists(configPath))) {
-    console.log(`Skipped existing ${configPath} (use --force to overwrite)`);
-  } else {
-    const defaultConfig: RawPluginConfig = {
-      stateDir: './state',
-      credentialsFile: './credentials.json',
-      t3: {
-        origin: 'http://127.0.0.1:3773',
-        executable: 'auto',
-        prefix: [],
-        env: {},
-      },
-      bridge: {
-        host: '127.0.0.1',
-        port: 18773,
-        proactiveBackgroundReports: false,
-        maxMessageChars: 1600,
-      },
-      gateway: {
-        bridgeUrl: 'http://127.0.0.1:18773/events',
-        requireMentionInGroup: true,
-        stripPrefix: '',
-      },
-      attachmentHosts: [...DEFAULT_ATTACHMENT_HOSTS],
-      bindings: [],
-    };
-    await writeFile(configPath, JSON.stringify(defaultConfig, null, 2) + '\n', 'utf8');
-    console.log(`Created ${configPath}`);
-  }
-
-  if (!force && (await fileExists(credsPath))) {
-    console.log(`Skipped existing ${credsPath} (use --force to overwrite)`);
-  } else {
-    const creds = {
-      appId: 'REPLACE_WITH_QQ_BOT_APP_ID',
-      appSecret: 'REPLACE_WITH_QQ_BOT_APP_SECRET',
-      bridgeSecret: randomBytes(32).toString('hex'),
-    };
-    await writeFile(credsPath, JSON.stringify(creds, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-    console.log(`Created ${credsPath} (generated random 32-byte bridgeSecret)`);
-  }
-
-  const detected = await resolveT3Command({ origin: 'http://127.0.0.1:3773', executable: 'auto', prefix: [], env: {} });
-  console.log(`Detected T3 CLI: ${detected.executable}${detected.prefix.length ? ' ' + detected.prefix.join(' ') : ''}`);
-  console.log('\nNext steps:');
-  console.log(`  1. Fill appId and appSecret in "${credsPath}"`);
-  console.log(`  2. Run: node "${import.meta.filename}" start --config "${configPath}"`);
-  console.log('  3. Send a message to your QQ Bot; copy the printed "c2c:<openid>" from logs');
-  console.log(
-    `  4. Run: node "${import.meta.filename}" bind --scope c2c:<openid> --workspace "<path>" [--thread <id>] --config "${configPath}"`,
-  );
+  await runInitWizard({
+    dir,
+    force: flags.get('force') === true,
+    nonInteractive: flags.get('yes') === true,
+    cliEntry: import.meta.filename,
+    bindAndInstallMcp: async args => {
+      const bindFlags = new Map<string, string | boolean>([
+        ['scope', args.scope],
+        ['workspace', args.workspace],
+        ...(args.threadId ? ([['thread', args.threadId]] as [string, string][]) : []),
+        ...(args.installMediaMcp ? ([['install-media-mcp', true]] as [string, boolean][]) : []),
+      ]);
+      await cmdBind(args.configPath, bindFlags);
+    },
+  });
 }
 
 async function waitForBridgeOrExit(
@@ -179,7 +139,44 @@ async function waitForBridgeOrExit(
   return { ready: false, exitedEarly };
 }
 
-async function cmdStart(configPath: string): Promise<void> {
+async function cmdStart(configPath: string, supervise = false): Promise<void> {
+  if (!supervise) {
+    await runStartOnce(configPath);
+    return;
+  }
+
+  let stopping = false;
+  const markStop = () => {
+    stopping = true;
+  };
+  process.once('SIGINT', markStop);
+  process.once('SIGTERM', markStop);
+
+  let consecutiveFailures = 0;
+  try {
+    while (!stopping) {
+      const startedAt = Date.now();
+      try {
+        await runStartOnce(configPath);
+        if (stopping) break;
+      } catch (error) {
+        if (stopping) break;
+        const uptimeMs = Date.now() - startedAt;
+        consecutiveFailures = uptimeMs > 60_000 ? 1 : consecutiveFailures + 1;
+        const backoffMs = Math.min(30_000, 3_000 * Math.pow(2, consecutiveFailures - 1));
+        console.error(
+          `Supervisor caught failure (${error instanceof Error ? error.message : String(error)}); restarting in ${backoffMs / 1000}s...`,
+        );
+        await sleep(backoffMs);
+      }
+    }
+  } finally {
+    process.off('SIGINT', markStop);
+    process.off('SIGTERM', markStop);
+  }
+}
+
+async function runStartOnce(configPath: string): Promise<void> {
   const config = await loadConfig(configPath);
   await loadCredentials(config);
 
@@ -554,8 +551,38 @@ async function main(): Promise<void> {
     await cmdInit(flags);
     return;
   }
+  if (command === 'config' || command === 'menu') {
+    const sub = positional[1];
+    if (sub === 'show') {
+      await runConfigShow(configPath);
+      return;
+    }
+    if (sub === 'set') {
+      const key = positional[2];
+      const value = positional[3];
+      if (!key || value === undefined) {
+        throw new Error('Usage: t3-qqbot config set <key> <value> [--config <path>]');
+      }
+      await runConfigSet(configPath, key, value);
+      return;
+    }
+    await runConfigMenu({
+      configPath,
+      cliEntry: import.meta.filename,
+      runDoctor: cmdDoctor,
+    });
+    return;
+  }
   if (command === 'start') {
-    await cmdStart(configPath);
+    await cmdStart(configPath, flags.get('supervise') === true);
+    return;
+  }
+  if (command === 'service') {
+    await runServiceCommand(positional[1], {
+      cliEntry: import.meta.filename,
+      configPath,
+      name: typeof flags.get('name') === 'string' ? String(flags.get('name')) : undefined,
+    });
     return;
   }
   if (command === 'bridge') {

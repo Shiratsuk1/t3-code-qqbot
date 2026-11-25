@@ -399,6 +399,9 @@ export async function createBridgeRuntime(
         console.error('QQ background report failed', runId, error instanceof Error ? error.message : String(error)),
       );
     }
+    if (config.bridge.autoSettleThread && result.status === 'completed' && !result.backgroundTaskIds.length) {
+      void observer.call('t3_thread_organize', { threadId, action: 'settle' }).catch(() => {});
+    }
   }
 
   async function relay(event: InboundEvent, target: Target, binding: ResolvedBinding, scope: string): Promise<void> {

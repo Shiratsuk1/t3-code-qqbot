@@ -30,7 +30,7 @@ test('cli.ts executes cleanly when invoked through a symlink/junction (Linux/mac
         else resolveOut(stdout);
       });
     });
-    assert.match(out, /t3-code-qqbot v1\.0\.0/);
+    assert.match(out, /t3-code-qqbot v1\.1\.0/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

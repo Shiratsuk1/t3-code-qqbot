@@ -37,26 +37,25 @@ flowchart LR
 # 1. 全局安装
 npm i -g t3-code-qqbot
 
-# 2. 创建工作目录并初始化 config.json 与 credentials.json（自动生成随机 bridgeSecret 并探测 T3 CLI）
+# 2. 创建工作目录并运行交互式安装向导（引导填凭据、群聊@、侧边栏收纳、可选静音、绑定与一键开机自守护）
 mkdir t3-qqbot && cd t3-qqbot
 t3-qqbot init
+# 自动化/无交互脚本可加 --yes 生成默认配置，随时用 t3-qqbot config 打开配置菜单修改
 
-# 3. 编辑 credentials.json，填入 QQ 开放平台的 appId 与 appSecret
-
-# 4. 启动服务并给你的 QQ 机器人发一条消息，从日志复制你的 c2c:<user_openid>
+# 3. 若第 2 步尚未拿到 openid：前台启动一次给 QQ 机器人发条消息，从日志复制 c2c:<user_openid>
 t3-qqbot start
 
-# 5. 绑定 QQ 会话到 T3 工作区（可选加 --thread <threadId> 绑定已有会话，加 --install-media-mcp 启用回传文件）
+# 4. 绑定 QQ 会话到 T3 工作区（加 --install-media-mcp 启用 AI 回传图片/文件）
 t3-qqbot bind --scope c2c:<你的user_openid> --workspace "<T3已注册的项目路径>" --install-media-mcp
 
-# 6. 体检并重启服务
+# 5. 体检并启用后台自守护（若向导中已启用可跳过）
 t3-qqbot doctor
-t3-qqbot start
+t3-qqbot service install
 ```
 
 ### 方式二：下载 GitHub Release 离线发布包
 
-从 Releases 下载 `t3-code-qqbot-v1.0.0.zip`（Windows）或 `t3-code-qqbot-v1.0.0.tar.gz`（Linux），解压后执行：
+从 Releases 下载 `t3-code-qqbot-v1.1.0.zip`（Windows）或 `t3-code-qqbot-v1.1.0.tar.gz`（Linux），解压后执行：
 
 ```bash
 npm ci --omit=dev
@@ -69,8 +68,10 @@ node dist/cli.mjs init
 
 | 命令 | 说明 |
 |---|---|
-| `t3-qqbot init [--dir <dir>] [--force]` | 生成 `config.json` 与 `credentials.json`（含随机 32 字节 `bridgeSecret`） |
-| `t3-qqbot start [--config <path>]` | 单机模式：自动依次启动 `bridge` 与 `gateway`，Ctrl+C 优雅同停 |
+| `t3-qqbot init [--dir <dir>] [--force] [--yes]` | 交互式安装向导（依次引导凭据、可选项、绑定与一键开机自启动；`--yes` 静默生成默认配置） |
+| `t3-qqbot config [show\|set <key> <val>] [--config <path>]` | 打开交互式配置菜单（凭据/T3/桥接/绑定/白名单/静音与收纳/守护服务/体检），或非交互读写单项配置 |
+| `t3-qqbot start [--config <path>] [--supervise]` | 单机模式：自动依次启动 `bridge` 与 `gateway`（`--supervise` 崩溃自动指数退避重启） |
+| `t3-qqbot service <install\|status\|start\|stop\|restart\|uninstall>` | 一键注册与管理本机后台自守护（Windows 无黑框计划任务 / Linux `systemd --user`） |
 | `t3-qqbot bridge [--config <path>]` | 仅启动 T3 桥接服务（默认监听 `127.0.0.1:18773`） |
 | `t3-qqbot gateway [--config <path>]` | 仅启动 QQ 官方 WebSocket 网关（支持双机分离最小配置） |
 | `t3-qqbot bind --scope <scope> [--workspace <dir>] [--thread <id>] [--install-media-mcp] [--config <path>]` | 校验并写入 QQ 与 T3 工作区/会话绑定 |
