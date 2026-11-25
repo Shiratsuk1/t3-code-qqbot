@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { APP_VERSION, samePath } from './config.ts';
 import type { Observer, ProjectListItem } from './observe.ts';
-import type { RollbackResult } from './t3-ws.ts';
+import type { NativeModelSelection, RollbackResult } from './t3-ws.ts';
 import type { ResolvedBinding, ResolvedPluginConfig } from './types.ts';
 
 const execFileAsync = promisify(execFile);
@@ -94,6 +94,7 @@ const SLASH_COMMAND_MAP: Record<string, ParsedSlashCommand['name']> = {
   '/t': 'think',
   '/provider': 'provider',
   '/providers': 'provider',
+  '/provide': 'provider',
   '/p': 'provider',
   '/tasks': 'tasks',
   '/cancel': 'cancel',
@@ -408,6 +409,14 @@ export type SlashHandlerDeps = {
   sendReply: (text: string) => Promise<void>;
   resolveActiveThread: (binding: ResolvedBinding, scope: string) => Promise<string>;
   setActiveThreadOverride: (binding: ResolvedBinding, threadId: string | null) => Promise<void>;
+  getThreadConfig?: (threadId: string) => Promise<ThreadConfigureResult>;
+  setThreadModel?: (threadId: string, modelSelection: NativeModelSelection) => Promise<void>;
+  createThread?: (input: {
+    projectId: string;
+    title: string;
+    modelSelection: NativeModelSelection;
+  }) => Promise<{ threadId: string }>;
+  stopThread?: (threadId: string, options: { reason?: string; stopDelegatedTasks?: boolean }) => Promise<void>;
   rollbackTurns: (threadId: string, turns: number, restoreFiles: boolean) => Promise<RollbackResult>;
   triggerGracefulRestart?: () => void;
 };
@@ -431,10 +440,55 @@ export function createSlashCommandHandler(deps: SlashHandlerDeps) {
     return project;
   };
 
-  const getCapabilities = () => deps.observer.call<OrchestratorCapabilities>('orchestrator_capabilities', {});
+  const getCapabilities = (search?: string) =>
+    deps.observer.call<OrchestratorCapabilities>('orchestrator_capabilities', search ? { search } : {});
 
   const getThreadConfig = (threadId: string) =>
-    deps.observer.call<ThreadConfigureResult>('t3_thread_configure', { threadId });
+    deps.getThreadConfig
+      ? deps.getThreadConfig(threadId)
+      : deps.observer.call<ThreadConfigureResult>('t3_thread_configure', { threadId });
+
+  const setThreadModel = async (threadId: string, modelSelection: NativeModelSelection) => {
+    if (deps.setThreadModel) {
+      await deps.setThreadModel(threadId, modelSelection);
+      return;
+    }
+    await deps.observer.call('t3_thread_configure', { threadId, modelSelection });
+  };
+
+  const createNewThread = async (input: {
+    projectId: string;
+    title: string;
+    modelSelection?: NativeModelSelection;
+  }): Promise<{ threadId: string }> => {
+    if (deps.createThread) {
+      let sel = input.modelSelection;
+      if (!sel?.model) {
+        const caps = await getCapabilities();
+        const firstProv = caps.providers.find(p => p.models.length > 0 && p.canRunChildTask !== false) ?? caps.providers[0];
+        const firstModel = firstProv?.models[0]?.id;
+        if (!firstProv || !firstModel) throw new Error('T3 Code 当前没有可用的 Provider 模型。');
+        sel = { instanceId: firstProv.providerInstanceId, model: firstModel };
+      }
+      return deps.createThread({ projectId: input.projectId, title: input.title, modelSelection: sel });
+    }
+    return deps.observer.call<{ threadId: string }>('t3_thread_launch', {
+      projectId: input.projectId,
+      title: input.title,
+      ...(input.modelSelection?.model ? { modelSelection: input.modelSelection } : {}),
+    });
+  };
+
+  const stopThread = async (threadId: string, options: { reason?: string; stopDelegatedTasks?: boolean } = {}) => {
+    if (deps.stopThread) {
+      await deps.stopThread(threadId, options);
+      return;
+    }
+    await deps.observer.call('t3_thread_interrupt', {
+      threadId,
+      ...(options.reason ? { reason: options.reason } : {}),
+    });
+  };
 
   return async function handleSlashCommand(
     cmd: ParsedSlashCommand,
@@ -528,10 +582,7 @@ export function createSlashCommandHandler(deps: SlashHandlerDeps) {
         await deps.sendReply(`Provider "${picked.providerInstanceId}" 当前没有可用模型。`);
         return 'handled';
       }
-      await deps.observer.call('t3_thread_configure', {
-        threadId,
-        modelSelection: { instanceId: picked.providerInstanceId, model: nextModel },
-      });
+      await setThreadModel(threadId, { instanceId: picked.providerInstanceId, model: nextModel });
       await deps.sendReply(
         `已切换 Provider 为：${picked.displayName ?? picked.providerInstanceId} (${picked.providerInstanceId})\n默认模型：${nextModel}`,
       );
@@ -558,13 +609,39 @@ export function createSlashCommandHandler(deps: SlashHandlerDeps) {
             return `${mark}[${idx + 1}] ${m.label ?? m.id} (${m.id})`;
           }),
           '',
-          '快捷切换：/model 1 · /model 4n · /model 4h xhigh · /model 3.8f · /model sol · /model provider/model',
+          '快捷切换：/model 1 · /model 4n · /model 4h xhigh · /model 3.8f · /model sol · /model provider/model · /model all',
         ];
         await deps.sendReply(lines.join('\n'));
         return 'handled';
       }
 
-      const resolved = resolveModelFromInput(cmd.args, caps.providers, currentInstance);
+      if (cmd.args.trim().toLowerCase() === 'all' || cmd.args.trim() === '全部') {
+        const lines = [
+          '全部可用供应商与模型一览',
+          `当前：${activeProvider?.displayName ?? currentInstance ?? '(默认)'} / ${currentModel ?? '(默认)'}${currentEffort ? ` · ${currentEffort}` : ''}`,
+          '',
+          ...enabled.flatMap(p => [
+            `▸ ${p.displayName ?? p.providerInstanceId} (${p.providerInstanceId})`,
+            ...p.models.map(m => {
+              const isCur = p.providerInstanceId === currentInstance && m.id === currentModel;
+              return `${isCur ? '  👉 ' : '     '}${m.id}`;
+            }),
+          ]),
+          '',
+          '跨供应商切换示例：/model codex/sol · /model antigravity_cloudstay/4n',
+        ];
+        await deps.sendReply(lines.join('\n'));
+        return 'handled';
+      }
+
+      let resolved = resolveModelFromInput(cmd.args, caps.providers, currentInstance);
+      if (!resolved.match && !resolved.candidates?.length) {
+        const searchTerm = cmd.args.trim().split(/\s+/)[0].split('/').pop() ?? cmd.args.trim();
+        const searched = await getCapabilities(searchTerm).catch(() => null);
+        if (searched?.providers?.length) {
+          resolved = resolveModelFromInput(cmd.args, searched.providers, currentInstance);
+        }
+      }
       if (resolved.candidates?.length) {
         const lines = [
           `找到多个匹配模型，请输入更精确的编号或名称：`,
@@ -574,7 +651,7 @@ export function createSlashCommandHandler(deps: SlashHandlerDeps) {
         return 'handled';
       }
       if (!resolved.match) {
-        await deps.sendReply(`未匹配到模型 "${cmd.args}"。发送 /model 查看当前可用模型列表。`);
+        await deps.sendReply(`未匹配到模型 "${cmd.args}"。发送 /model 查看当前可用模型列表，或发 /model all 查看全部。`);
         return 'handled';
       }
 
@@ -591,13 +668,10 @@ export function createSlashCommandHandler(deps: SlashHandlerDeps) {
         }
       }
 
-      await deps.observer.call('t3_thread_configure', {
-        threadId,
-        modelSelection: {
-          instanceId: provider.providerInstanceId,
-          model: model.id,
-          ...(nextOptions ? { options: nextOptions } : {}),
-        },
+      await setThreadModel(threadId, {
+        instanceId: provider.providerInstanceId,
+        model: model.id,
+        ...(nextOptions ? { options: nextOptions } : {}),
       });
       await deps.sendReply(
         `已切换模型：${model.label ?? model.id} (${model.id})\nProvider：${provider.displayName ?? provider.providerInstanceId}${appliedEffort ? `\n思考强度：${appliedEffort}` : ''}`,
@@ -634,13 +708,10 @@ export function createSlashCommandHandler(deps: SlashHandlerDeps) {
       const optionId = effortOpt?.id ?? 'thought_level';
       const applied = effortOpt ? normalizeEffortValueForOption(parsed, effortOpt) ?? parsed : parsed;
 
-      await deps.observer.call('t3_thread_configure', {
-        threadId,
-        modelSelection: {
-          ...(currentInstance ? { instanceId: currentInstance } : {}),
-          model: currentModelId,
-          options: [{ id: optionId, value: applied }],
-        },
+      await setThreadModel(threadId, {
+        ...(currentInstance ? { instanceId: currentInstance } : {}),
+        model: currentModelId,
+        options: [{ id: optionId, value: applied }],
       });
       await deps.sendReply(`已切换思考强度：${applied}（模型：${currentModelId}）`);
       return 'handled';
@@ -652,10 +723,20 @@ export function createSlashCommandHandler(deps: SlashHandlerDeps) {
         getThreadConfig(threadId).catch(() => null),
       ]);
       const title = cmd.args || `QQ ${scope.startsWith('group:') ? '群聊' : '私聊'} ${new Date().toISOString().slice(5, 16).replace('T', ' ')}`;
-      const created = await deps.observer.call<{ threadId: string }>('t3_thread_launch', {
+      const inheritedSel: NativeModelSelection | undefined = cfgRes?.modelSelection?.model
+        ? {
+            ...(cfgRes.modelSelection.instanceId ? { instanceId: cfgRes.modelSelection.instanceId } : {}),
+            ...(cfgRes.modelSelection.provider && !cfgRes.modelSelection.instanceId
+              ? { instanceId: cfgRes.modelSelection.provider }
+              : {}),
+            model: cfgRes.modelSelection.model,
+            ...(cfgRes.modelSelection.options ? { options: cfgRes.modelSelection.options } : {}),
+          }
+        : undefined;
+      const created = await createNewThread({
         projectId: project.id,
         title,
-        ...(cfgRes?.modelSelection?.model ? { modelSelection: cfgRes.modelSelection } : {}),
+        modelSelection: inheritedSel,
       });
       if (!created?.threadId) throw new Error('T3 Code 未返回新会话 threadId');
       await deps.setActiveThreadOverride(binding, created.threadId);
@@ -767,23 +848,19 @@ export function createSlashCommandHandler(deps: SlashHandlerDeps) {
     if (cmd.name === 'cancel') {
       const arg = cmd.args.trim();
       if (!arg) {
-        await deps.observer.call('t3_thread_interrupt', {
-          threadId,
+        await stopThread(threadId, {
           reason: 'Stopped by user via QQ /stop command',
+          stopDelegatedTasks: false,
         });
         await deps.sendReply('已发送中断指令，停止当前 T3 会话正在执行的轮次。');
         return 'handled';
       }
       if (arg.toLowerCase() === 'all') {
-        const snap = await deps.observer.read(threadId);
-        const pending = snap.thread.pendingBackgroundTasks ?? [];
-        await deps.observer.call('t3_thread_interrupt', { threadId, reason: 'Stopped via QQ /cancel all' }).catch(() => {});
-        let cancelled = 0;
-        for (const t of pending) {
-          await deps.observer.call('task_cancel', { taskId: t.taskId, reason: 'Cancelled via QQ /cancel all' }).catch(() => {});
-          cancelled++;
-        }
-        await deps.sendReply(`已中断主会话并取消 ${cancelled} 个后台委派任务。`);
+        await stopThread(threadId, {
+          reason: 'Stopped via QQ /cancel all',
+          stopDelegatedTasks: true,
+        });
+        await deps.sendReply('已中断主会话并停止全部关联后台委派任务。');
         return 'handled';
       }
       await deps.observer.call('task_cancel', {

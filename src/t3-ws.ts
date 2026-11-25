@@ -79,6 +79,23 @@ export type RollbackResult = {
   restoreFiles: boolean;
 };
 
+export type NativeModelSelection = {
+  instanceId?: string;
+  provider?: string;
+  model: string;
+  options?: { id: string; value: string | boolean }[] | Record<string, string | boolean>;
+};
+
+export type NativeThreadState = {
+  threadId: string;
+  title?: string;
+  projectId?: string;
+  providerInstanceId?: string;
+  modelSelection?: NativeModelSelection;
+  runtimeMode?: string;
+  interactionMode?: string;
+};
+
 export type TurnItem = {
   id: string;
   runId: string | null;
@@ -454,6 +471,130 @@ export async function rollbackThreadTurns(
   } finally {
     socket.close();
   }
+}
+
+async function withT3Socket<T>(
+  origin: string,
+  token: string,
+  fn: (rpc: <R>(tag: string, payload: object) => Promise<R>) => Promise<T>,
+): Promise<T> {
+  const socket = openT3Socket(origin, token);
+  const ignoreLateError = () => {};
+  socket.on('error', ignoreLateError);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const onOpen = () => {
+        socket.off('error', onError);
+        resolve();
+      };
+      const onError = (err: Error) => {
+        socket.off('open', onOpen);
+        reject(err);
+      };
+      socket.once('open', onOpen);
+      socket.once('error', onError);
+    });
+    let seq = 0;
+    const rpc = <R>(tag: string, payload: object) => sendRpc<R>(socket, tag, payload, String(++seq));
+    return await fn(rpc);
+  } finally {
+    socket.close();
+  }
+}
+
+export async function getThreadState(
+  origin: string,
+  token: string,
+  threadId: string,
+): Promise<NativeThreadState> {
+  return withT3Socket(origin, token, async rpc => {
+    const proj = await rpc<{ thread?: Record<string, any> }>('orchestration.getThreadProjection', { threadId });
+    const t = proj?.thread ?? {};
+    return {
+      threadId: String(t.id ?? threadId),
+      title: typeof t.title === 'string' ? t.title : undefined,
+      projectId: typeof t.projectId === 'string' ? t.projectId : undefined,
+      providerInstanceId: typeof t.providerInstanceId === 'string' ? t.providerInstanceId : undefined,
+      modelSelection: t.modelSelection && typeof t.modelSelection === 'object' ? t.modelSelection : undefined,
+      runtimeMode: typeof t.runtimeMode === 'string' ? t.runtimeMode : undefined,
+      interactionMode: typeof t.interactionMode === 'string' ? t.interactionMode : undefined,
+    };
+  });
+}
+
+export async function setThreadModelSelection(
+  origin: string,
+  token: string,
+  threadId: string,
+  modelSelection: NativeModelSelection,
+): Promise<void> {
+  await withT3Socket(origin, token, async rpc => {
+    await rpc('orchestration.dispatchCommand', {
+      type: 'thread.model-selection.set',
+      commandId: `qq-model:${randomUUID()}`,
+      threadId,
+      modelSelection,
+    });
+  });
+}
+
+export async function createNativeThread(
+  origin: string,
+  token: string,
+  input: {
+    projectId: string;
+    title: string;
+    modelSelection: NativeModelSelection;
+    runtimeMode?: string;
+    interactionMode?: string;
+    threadId?: string;
+  },
+): Promise<{ threadId: string }> {
+  const threadId = input.threadId ?? randomUUID();
+  await withT3Socket(origin, token, async rpc => {
+    await rpc('orchestration.dispatchCommand', {
+      type: 'thread.create',
+      commandId: `qq-create:${randomUUID()}`,
+      threadId,
+      projectId: input.projectId,
+      title: input.title,
+      modelSelection: input.modelSelection,
+      runtimeMode: input.runtimeMode ?? 'full-access',
+      interactionMode: input.interactionMode ?? 'default',
+      branch: null,
+      worktreePath: null,
+      createdBy: 'user',
+      creationSource: 'server',
+    });
+  });
+  return { threadId };
+}
+
+export async function stopNativeThread(
+  origin: string,
+  token: string,
+  threadId: string,
+  options: { reason?: string; stopDelegatedTasks?: boolean } = {},
+): Promise<void> {
+  await withT3Socket(origin, token, async rpc => {
+    await rpc('orchestration.dispatchCommand', {
+      type: 'thread.stop',
+      commandId: `qq-stop:${randomUUID()}`,
+      threadId,
+      ...(options.reason ? { reason: options.reason } : {}),
+      ...(options.stopDelegatedTasks !== undefined ? { stopDelegatedTasks: options.stopDelegatedTasks } : {}),
+    });
+  });
+}
+
+export async function settleNativeThread(origin: string, token: string, threadId: string): Promise<void> {
+  await withT3Socket(origin, token, async rpc => {
+    await rpc('orchestration.dispatchCommand', {
+      type: 'thread.settle',
+      commandId: `qq-settle:${randomUUID()}`,
+      threadId,
+    });
+  });
 }
 
 export async function readReply(

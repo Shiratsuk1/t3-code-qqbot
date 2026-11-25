@@ -61,6 +61,7 @@ test('parseSlashCommand recognizes all commands, aliases, and ignores attachment
   assert.deepEqual(parseSlashCommand('/m 4h xhigh'), { name: 'model', args: '4h xhigh' });
   assert.deepEqual(parseSlashCommand('/t xh'), { name: 'think', args: 'xh' });
   assert.deepEqual(parseSlashCommand('/p codex'), { name: 'provider', args: 'codex' });
+  assert.deepEqual(parseSlashCommand('/provide'), { name: 'provider', args: '' });
   assert.deepEqual(parseSlashCommand('/reset 新话题'), { name: 'new', args: '新话题' });
   assert.deepEqual(parseSlashCommand('/撤回 2'), { name: 'rewind', args: '2' });
   assert.deepEqual(parseSlashCommand('/stop'), { name: 'cancel', args: '' });
@@ -189,6 +190,10 @@ test('createSlashCommandHandler executes /model, /think, /new, /threads, /use, /
 
     assert.equal(await handler({ name: 'help', args: '' }, binding, 'c2c:U1'), 'handled');
     assert.match(replies.at(-1)!, /\/model/);
+
+    assert.equal(await handler({ name: 'model', args: 'all' }, binding, 'c2c:U1'), 'handled');
+    assert.match(replies.at(-1)!, /全部可用供应商与模型一览/);
+    assert.match(replies.at(-1)!, /gpt-6\.2-sol/);
 
     assert.equal(await handler({ name: 'model', args: '4h xhigh' }, binding, 'c2c:U1'), 'handled');
     const cfgCall = calls.find(c => c.name === 't3_thread_configure' && c.args.modelSelection);

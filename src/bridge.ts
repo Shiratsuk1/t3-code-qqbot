@@ -25,7 +25,18 @@ import {
   writeActiveThreadOverride,
 } from './slash-commands.ts';
 import { T3Cli } from './t3-cli.ts';
-import { dispatchMessage, readReply, rollbackThreadTurns, TERMINAL_RUN_STATUSES } from './t3-ws.ts';
+import {
+  createNativeThread,
+  dispatchMessage,
+  getThreadState,
+  readReply,
+  rollbackThreadTurns,
+  settleNativeThread,
+  setThreadModelSelection,
+  stopNativeThread,
+  TERMINAL_RUN_STATUSES,
+} from './t3-ws.ts';
+import type { NativeModelSelection } from './t3-ws.ts';
 import type {
   Credentials,
   InboundEvent,
@@ -205,11 +216,35 @@ export async function createBridgeRuntime(
           `Workspace "${binding.workspace}" is not registered in T3 Code. Open or add it as a T3 project first.`,
         );
       }
-      const created = await observer.call<{ threadId: string }>('t3_thread_launch', {
-        projectId: project.id,
-        title: `QQ ${scope.startsWith('group:') ? 'Group' : 'Chat'} ${binding.scopeHash.slice(0, 8)}`,
-        ...(binding.modelSelection ? { modelSelection: binding.modelSelection } : {}),
-      });
+      let modelSelection: NativeModelSelection | undefined = binding.modelSelection?.model
+        ? {
+            ...(binding.modelSelection.provider ? { instanceId: binding.modelSelection.provider } : {}),
+            model: binding.modelSelection.model,
+          }
+        : undefined;
+      if (!modelSelection) {
+        const caps = await observer.call<{
+          providers: { providerInstanceId: string; canRunChildTask?: boolean; models: { id: string }[] }[];
+        }>('orchestrator_capabilities', {});
+        const firstProv =
+          caps.providers.find(p => p.models.length > 0 && p.canRunChildTask !== false) ?? caps.providers[0];
+        const firstModel = firstProv?.models[0]?.id;
+        if (!firstProv || !firstModel) {
+          throw new Error('T3 Code has no enabled provider model available to auto-create a thread');
+        }
+        modelSelection = { instanceId: firstProv.providerInstanceId, model: firstModel };
+      }
+      const created = await t3Cli.withSession(
+        { scopes: ['orchestration:read', 'orchestration:operate'], ttl: '2m', label: 'T3 QQBot auto thread' },
+        token =>
+          createNativeThread(config.t3.origin, token, {
+            projectId: project.id,
+            title: `QQ ${scope.startsWith('group:') ? 'Group' : 'Chat'} ${binding.scopeHash.slice(0, 8)}`,
+            modelSelection,
+            runtimeMode: 'full-access',
+            interactionMode: 'default',
+          }),
+      );
       if (!created?.threadId) throw new Error('T3 did not return threadId when auto-creating a thread');
       await writeActiveThreadOverride(root, binding.scopeHash, created.threadId);
       console.info('Auto-created T3 thread for scope', `sha256:${binding.scopeHash.slice(0, 12)}`, created.threadId);
@@ -240,6 +275,31 @@ export async function createBridgeRuntime(
         threadLocks.delete(binding.scopeHash);
         await writeActiveThreadOverride(root, binding.scopeHash, nextThreadId);
       },
+      getThreadConfig: threadId =>
+        t3Cli.withSession(
+          { scopes: ['orchestration:read'], ttl: '2m', label: 'T3 QQBot read thread' },
+          token => getThreadState(config.t3.origin, token, threadId),
+        ),
+      setThreadModel: (threadId, modelSelection) =>
+        t3Cli.withSession(
+          { scopes: ['orchestration:read', 'orchestration:operate'], ttl: '2m', label: 'T3 QQBot set model' },
+          token => setThreadModelSelection(config.t3.origin, token, threadId, modelSelection),
+        ),
+      createThread: input =>
+        t3Cli.withSession(
+          { scopes: ['orchestration:read', 'orchestration:operate'], ttl: '2m', label: 'T3 QQBot create thread' },
+          token =>
+            createNativeThread(config.t3.origin, token, {
+              ...input,
+              runtimeMode: 'full-access',
+              interactionMode: 'default',
+            }),
+        ),
+      stopThread: (threadId, options) =>
+        t3Cli.withSession(
+          { scopes: ['orchestration:read', 'orchestration:operate'], ttl: '2m', label: 'T3 QQBot stop thread' },
+          token => stopNativeThread(config.t3.origin, token, threadId, options),
+        ),
       rollbackTurns: (threadId, turns, restoreFiles) =>
         t3Cli.withSession(
           { scopes: ['orchestration:read', 'orchestration:operate'], ttl: '2m', label: 'T3 QQBot rollback' },
@@ -468,7 +528,12 @@ export async function createBridgeRuntime(
       );
     }
     if (config.bridge.autoSettleThread && result.status === 'completed' && !result.backgroundTaskIds.length) {
-      void observer.call('t3_thread_organize', { threadId, action: 'settle' }).catch(() => {});
+      void t3Cli
+        .withSession(
+          { scopes: ['orchestration:read', 'orchestration:operate'], ttl: '2m', label: 'T3 QQBot settle' },
+          token => settleNativeThread(config.t3.origin, token, threadId),
+        )
+        .catch(() => {});
     }
   }
 

@@ -4,10 +4,15 @@ import test from 'node:test';
 import { WebSocketServer } from 'ws';
 import { Observer } from '../src/observe.ts';
 import {
+  createNativeThread,
   dispatchMessage,
+  getThreadState,
   planCheckpointRollback,
   readReply,
   rollbackThreadTurns,
+  settleNativeThread,
+  setThreadModelSelection,
+  stopNativeThread,
 } from '../src/t3-ws.ts';
 import type { ThreadRollbackProjection } from '../src/t3-ws.ts';
 
@@ -459,6 +464,84 @@ test('rollbackThreadTurns detects turn-0 baseline completion when rolled-back ru
     assert.equal(res.targetOrdinal, 0);
     assert.equal(res.remainingTurns, 0);
     assert.equal(res.checkpointId, 'cp-0');
+  } finally {
+    wss.close();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test('native WS helpers create full-access threads, switch models, stop, and settle without MCP mode caps', async () => {
+  const server = createServer();
+  const wss = new WebSocketServer({ server });
+  const dispatched: any[] = [];
+
+  wss.on('connection', socket => {
+    socket.on('message', raw => {
+      const msg = JSON.parse(raw.toString());
+      if (msg._tag === 'Request' && msg.tag === 'orchestration.dispatchCommand') {
+        dispatched.push(msg.payload);
+        socket.send(JSON.stringify({ _tag: 'Exit', requestId: msg.id, exit: { _tag: 'Success', value: { sequence: dispatched.length } } }));
+      } else if (msg._tag === 'Request' && msg.tag === 'orchestration.getThreadProjection') {
+        socket.send(
+          JSON.stringify({
+            _tag: 'Exit',
+            requestId: msg.id,
+            exit: {
+              _tag: 'Success',
+              value: {
+                thread: {
+                  id: msg.payload.threadId,
+                  runtimeMode: 'full-access',
+                  interactionMode: 'default',
+                  providerInstanceId: 'antigravity_yzksrs',
+                  modelSelection: {
+                    instanceId: 'antigravity_yzksrs',
+                    model: 'gemini-3.8-flash',
+                    options: [{ id: 'thought_level', value: 'low' }],
+                  },
+                },
+              },
+            },
+          }),
+        );
+      }
+    });
+  });
+
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const addr = server.address();
+  assert.ok(addr && typeof addr === 'object');
+  const origin = `http://127.0.0.1:${addr.port}`;
+
+  try {
+    const state = await getThreadState(origin, 'tok', 't-full');
+    assert.equal(state.runtimeMode, 'full-access');
+    assert.equal(state.modelSelection?.model, 'gemini-3.8-flash');
+
+    const created = await createNativeThread(origin, 'tok', {
+      projectId: 'proj-1',
+      title: 'Full Access Thread',
+      modelSelection: { instanceId: 'antigravity_yzksrs', model: 'gemini-3.8-flash' },
+    });
+    assert.ok(created.threadId);
+    assert.equal(dispatched[0]?.type, 'thread.create');
+    assert.equal(dispatched[0]?.runtimeMode, 'full-access');
+    assert.equal(dispatched[0]?.interactionMode, 'default');
+
+    await setThreadModelSelection(origin, 'tok', 't-full', {
+      instanceId: 'antigravity_cloudstay',
+      model: 'gemini-4-neon',
+      options: [{ id: 'thought_level', value: 'high' }],
+    });
+    assert.equal(dispatched[1]?.type, 'thread.model-selection.set');
+    assert.equal(dispatched[1]?.modelSelection.model, 'gemini-4-neon');
+
+    await stopNativeThread(origin, 'tok', 't-full', { reason: 'user stop', stopDelegatedTasks: true });
+    assert.equal(dispatched[2]?.type, 'thread.stop');
+    assert.equal(dispatched[2]?.stopDelegatedTasks, true);
+
+    await settleNativeThread(origin, 'tok', 't-full');
+    assert.equal(dispatched[3]?.type, 'thread.settle');
   } finally {
     wss.close();
     await new Promise<void>(resolve => server.close(() => resolve()));
