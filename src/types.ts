@@ -67,6 +67,7 @@ export type BridgeConfig = {
   proactiveBackgroundReports?: boolean;
   maxMessageChars?: number;
   autoSettleThread?: boolean;
+  enableSlashCommands?: boolean;
   testStaging?: string;
 };
 
@@ -113,6 +114,7 @@ export type ResolvedPluginConfig = {
     proactiveBackgroundReports: boolean;
     maxMessageChars: number;
     autoSettleThread: boolean;
+    enableSlashCommands: boolean;
     testStaging?: string;
   };
   gateway: {

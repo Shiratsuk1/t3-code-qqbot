@@ -10,6 +10,7 @@ import {
 } from './config.ts';
 import { Observer } from './observe.ts';
 import type { ProjectListItem } from './observe.ts';
+import { runQrBotLogin } from './qr-login.ts';
 import { runServiceCommand } from './service.ts';
 import { resolveT3Command, T3Cli } from './t3-cli.ts';
 import type { BindingConfig, Credentials, RawPluginConfig } from './types.ts';
@@ -36,6 +37,8 @@ export function createDefaultRawConfig(): RawPluginConfig {
       port: 18773,
       proactiveBackgroundReports: false,
       maxMessageChars: 1600,
+      autoSettleThread: false,
+      enableSlashCommands: true,
     },
     gateway: {
       bridgeUrl: 'http://127.0.0.1:18773/events',
@@ -108,6 +111,9 @@ export function applyConfigSet(raw: RawPluginConfig, key: string, value: string)
     case 'bridge.autoSettleThread':
       next.bridge.autoSettleThread = parseBool(value);
       break;
+    case 'bridge.enableSlashCommands':
+      next.bridge.enableSlashCommands = parseBool(value);
+      break;
     case 'gateway.bridgeUrl':
       next.gateway.bridgeUrl = value.trim();
       break;
@@ -119,7 +125,7 @@ export function applyConfigSet(raw: RawPluginConfig, key: string, value: string)
       break;
     default:
       throw new Error(
-        `Unknown config key "${key}". Supported keys: stateDir, credentialsFile, t3.origin, t3.executable, t3.home, t3.muteMobileCompletionThreadId, bridge.host, bridge.port, bridge.maxMessageChars, bridge.proactiveBackgroundReports, bridge.autoSettleThread, gateway.bridgeUrl, gateway.requireMentionInGroup, gateway.stripPrefix`,
+        `Unknown config key "${key}". Supported keys: stateDir, credentialsFile, t3.origin, t3.executable, t3.home, t3.muteMobileCompletionThreadId, bridge.host, bridge.port, bridge.maxMessageChars, bridge.proactiveBackgroundReports, bridge.autoSettleThread, bridge.enableSlashCommands, gateway.bridgeUrl, gateway.requireMentionInGroup, gateway.stripPrefix`,
       );
   }
   return next;
@@ -287,12 +293,39 @@ export async function runInitWizard(options: {
     const existingCreds = credsExists ? await readCredsSafe(credsPath) : {};
     let raw = configExists ? await readOrCreateRawConfig(configPath) : createDefaultRawConfig();
 
-    console.log('\n[1/5] QQ Bot 凭据（留空可稍后用 t3-qqbot config 补填）');
-    const appIdIn = await ask('  QQ Bot AppID', maskSecret(existingCreds.appId));
-    const appSecretIn = await ask('  QQ Bot AppSecret', maskSecret(existingCreds.appSecret));
+    console.log('\n[1/5] QQ Bot 凭据');
+    console.log('  [1] 手机 QQ 扫码一键绑定（自动获取 AppID、AppSecret 与你的 user_openid，推荐）');
+    console.log('  [2] 手动输入 AppID / AppSecret（或留空稍后补填）');
+    const authMode = await ask('  选择凭据配置方式 [1/2]', '1');
+
+    let appIdVal = existingCreds.appId || 'REPLACE_WITH_QQ_BOT_APP_ID';
+    let appSecretVal = existingCreds.appSecret || 'REPLACE_WITH_QQ_BOT_APP_SECRET';
+    let qrUserOpenid: string | undefined;
+
+    if (authMode === '1') {
+      try {
+        const qr = await runQrBotLogin();
+        appIdVal = qr.appId;
+        appSecretVal = qr.appSecret;
+        qrUserOpenid = qr.userOpenid;
+        console.log(`  扫码绑定成功！AppID: ${maskSecret(appIdVal)}${qrUserOpenid ? ` · 自动获取 openid: c2c:${qrUserOpenid}` : ''}`);
+      } catch (error) {
+        console.warn(`  扫码未完成 (${error instanceof Error ? error.message : String(error)})，回退到手动输入：`);
+        const appIdIn = await ask('  QQ Bot AppID', maskSecret(existingCreds.appId));
+        const appSecretIn = await ask('  QQ Bot AppSecret', maskSecret(existingCreds.appSecret));
+        if (appIdIn) appIdVal = appIdIn;
+        if (appSecretIn) appSecretVal = appSecretIn;
+      }
+    } else {
+      const appIdIn = await ask('  QQ Bot AppID', maskSecret(existingCreds.appId));
+      const appSecretIn = await ask('  QQ Bot AppSecret', maskSecret(existingCreds.appSecret));
+      if (appIdIn) appIdVal = appIdIn;
+      if (appSecretIn) appSecretVal = appSecretIn;
+    }
+
     const finalCreds: Credentials = {
-      appId: appIdIn || existingCreds.appId || 'REPLACE_WITH_QQ_BOT_APP_ID',
-      appSecret: appSecretIn || existingCreds.appSecret || 'REPLACE_WITH_QQ_BOT_APP_SECRET',
+      appId: appIdVal,
+      appSecret: appSecretVal,
       bridgeSecret:
         existingCreds.bridgeSecret && !existingCreds.bridgeSecret.startsWith('REPLACE_WITH_')
           ? existingCreds.bridgeSecret
@@ -308,6 +341,12 @@ export async function runInitWizard(options: {
     if (portIn) raw = applyConfigSet(raw, 'bridge.port', portIn);
 
     console.log('\n[3/5] 行为与体验可选项');
+    const enableSlash = await askYesNo(
+      '  启用 QQ 聊天内斜杠指令面板 (/help, /model, /think, /new, /rewind, /stop 等)?',
+      raw.bridge?.enableSlashCommands ?? true,
+    );
+    raw = applyConfigSet(raw, 'bridge.enableSlashCommands', String(enableSlash));
+
     const requireMention = await askYesNo('  群聊中是否必须 @机器人 才响应?', raw.gateway?.requireMentionInGroup ?? true);
     raw = applyConfigSet(raw, 'gateway.requireMentionInGroup', String(requireMention));
 
@@ -335,7 +374,14 @@ export async function runInitWizard(options: {
     console.log(`已保存凭据: ${credsPath}`);
 
     console.log('\n[4/5] QQ 会话绑定（可选）');
-    const knownScope = await ask('  如已知你的 QQ scope (如 c2c:OPENID)，直接输入；尚未获取请回车跳过');
+    const defaultScope = qrUserOpenid ? `c2c:${qrUserOpenid}` : '';
+    const scopeInput = await ask(
+      defaultScope
+        ? '  已通过扫码获取你的私聊 scope（直接回车使用，填 - 跳过）'
+        : '  如已知你的 QQ scope (如 c2c:OPENID)，直接输入；尚未获取请回车跳过',
+      defaultScope,
+    );
+    const knownScope = scopeInput === '-' ? '' : scopeInput || defaultScope;
     if (knownScope) {
       const projects = await fetchT3ProjectsBestEffort(configPath);
       let workspace = '';
@@ -404,6 +450,33 @@ export async function runInitWizard(options: {
     console.log(`  - 后台守护管理:   t3-qqbot service status|restart|stop --config "${configPath}"`);
   } finally {
     rl.close();
+  }
+}
+
+export async function runQrLoginCommand(configPath: string): Promise<void> {
+  const absPath = resolve(configPath);
+  const raw = await readOrCreateRawConfig(absPath);
+  const credsPath = resolveCredsPath(absPath, raw);
+  const existing = await readCredsSafe(credsPath);
+  const qr = await runQrBotLogin();
+  const nextCreds: Credentials = {
+    appId: qr.appId,
+    appSecret: qr.appSecret,
+    bridgeSecret:
+      existing.bridgeSecret && !existing.bridgeSecret.startsWith('REPLACE_WITH_')
+        ? existing.bridgeSecret
+        : randomBytes(32).toString('hex'),
+  };
+  await atomicWriteJson(credsPath, nextCreds, 0o600);
+  if (!raw.credentialsFile) {
+    raw.credentialsFile = './credentials.json';
+    await saveValidatedConfig(absPath, raw);
+  }
+  console.log(`\n扫码登录成功！凭据已保存至 ${credsPath}`);
+  console.log(`  AppID: ${maskSecret(qr.appId)}`);
+  if (qr.userOpenid) {
+    console.log(`  你的 QQ 私聊 scope: c2c:${qr.userOpenid}`);
+    console.log(`  可直接绑定: t3-qqbot bind --scope c2c:${qr.userOpenid} --workspace "<T3项目路径>" --install-media-mcp --config "${absPath}"`);
   }
 }
 
@@ -496,13 +569,27 @@ export async function runConfigMenu(options: {
       try {
         if (choice === '1') {
           console.log(`\n--- QQ Bot 凭据 (${credsPath}) ---`);
-          console.log('直接回车保持原值不变。');
-          const nextAppId = await ask('AppID', maskSecret(creds.appId));
-          const nextAppSecret = await ask('AppSecret', maskSecret(creds.appSecret));
+          const mode = await ask('方式: [1] 手机QQ扫码一键绑定 / [2] 手动填写', '2');
+          let nextAppId = creds.appId || 'REPLACE_WITH_QQ_BOT_APP_ID';
+          let nextAppSecret = creds.appSecret || 'REPLACE_WITH_QQ_BOT_APP_SECRET';
+          if (mode === '1') {
+            const qr = await runQrBotLogin();
+            nextAppId = qr.appId;
+            nextAppSecret = qr.appSecret;
+            if (qr.userOpenid) {
+              console.log(`扫码获取到你的私聊 scope: c2c:${qr.userOpenid}`);
+            }
+          } else {
+            console.log('直接回车保持原值不变。');
+            const inputAppId = await ask('AppID', maskSecret(creds.appId));
+            const inputAppSecret = await ask('AppSecret', maskSecret(creds.appSecret));
+            if (inputAppId) nextAppId = inputAppId;
+            if (inputAppSecret) nextAppSecret = inputAppSecret;
+          }
           const regen = await ask('是否重新生成随机 bridgeSecret? (y/N)', 'N');
           const nextCreds: Credentials = {
-            appId: nextAppId || creds.appId || 'REPLACE_WITH_QQ_BOT_APP_ID',
-            appSecret: nextAppSecret || creds.appSecret || 'REPLACE_WITH_QQ_BOT_APP_SECRET',
+            appId: nextAppId,
+            appSecret: nextAppSecret,
             bridgeSecret:
               regen.toLowerCase() === 'y' || !creds.bridgeSecret || creds.bridgeSecret.startsWith('REPLACE_WITH_')
                 ? randomBytes(32).toString('hex')
@@ -531,6 +618,10 @@ export async function runConfigMenu(options: {
           console.log('\n--- 桥接与网关参数 ---');
           const port = await ask('本地桥接端口 (bridge.port)', String(raw.bridge?.port ?? 18773));
           const maxChars = await ask('单条回复最大字数 (100-4000)', String(raw.bridge?.maxMessageChars ?? 1600));
+          const slashEnabled = await ask(
+            '启用 QQ 聊天内斜杠指令面板 (true/false)',
+            String(raw.bridge?.enableSlashCommands ?? true),
+          );
           const proactive = await ask(
             '后台子任务允许主动推送 (true/false)',
             String(raw.bridge?.proactiveBackgroundReports ?? false),
@@ -550,6 +641,7 @@ export async function runConfigMenu(options: {
           let next = raw;
           if (port) next = applyConfigSet(next, 'bridge.port', port);
           if (maxChars) next = applyConfigSet(next, 'bridge.maxMessageChars', maxChars);
+          if (slashEnabled) next = applyConfigSet(next, 'bridge.enableSlashCommands', slashEnabled);
           if (proactive) next = applyConfigSet(next, 'bridge.proactiveBackgroundReports', proactive);
           if (mention) next = applyConfigSet(next, 'gateway.requireMentionInGroup', mention);
           if (stripPrefix === '-') next = applyConfigSet(next, 'gateway.stripPrefix', '');

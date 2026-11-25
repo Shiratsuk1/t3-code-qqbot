@@ -12,7 +12,7 @@ import {
   samePath,
   scopeToHash,
 } from './config.ts';
-import { runConfigMenu, runConfigSet, runConfigShow, runInitWizard } from './menu.ts';
+import { runConfigMenu, runConfigSet, runConfigShow, runInitWizard, runQrLoginCommand } from './menu.ts';
 import { Observer } from './observe.ts';
 import type { ProjectListItem } from './observe.ts';
 import { digest } from './protocol.ts';
@@ -74,7 +74,8 @@ Usage:
 
 Commands:
   init [--dir <dir>] [--force] [--yes]
-                                     Interactive setup wizard (credentials, options, binding & auto-start daemon; --yes skips prompts)
+                                     Interactive setup wizard (QR login/credentials, options, binding & auto-start daemon; --yes skips prompts)
+  login [--config <path>]            Scan QR code in terminal to bind QQ Bot (AppID, AppSecret & user_openid)
   config [show|set <key> <value>] [--config <path>]
                                      Open interactive config menu (or show / set a single config key)
   start [--config <path>] [--supervise]
@@ -549,6 +550,10 @@ async function main(): Promise<void> {
 
   if (command === 'init') {
     await cmdInit(flags);
+    return;
+  }
+  if (command === 'login') {
+    await runQrLoginCommand(configPath);
     return;
   }
   if (command === 'config' || command === 'menu') {

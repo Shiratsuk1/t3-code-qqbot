@@ -96,14 +96,14 @@ mkdir -p ~/t3-qqbot && cd ~/t3-qqbot
 
 - **Windows（PowerShell）**：
   ```powershell
-  Expand-Archive -Path .\t3-code-qqbot-v1.1.0.zip -DestinationPath C:\Tools\
-  cd C:\Tools\t3-code-qqbot-v1.1.0
+  Expand-Archive -Path .\t3-code-qqbot-v1.2.0.zip -DestinationPath C:\Tools\
+  cd C:\Tools\t3-code-qqbot-v1.2.0
   npm ci --omit=dev
   ```
 - **Linux（Bash）**：
   ```bash
   mkdir -p ~/t3-code-qqbot
-  tar -xzf t3-code-qqbot-v1.1.0.tar.gz -C ~/t3-code-qqbot --strip-components=1
+  tar -xzf t3-code-qqbot-v1.2.0.tar.gz -C ~/t3-code-qqbot --strip-components=1
   cd ~/t3-code-qqbot
   npm ci --omit=dev
   ```
@@ -112,14 +112,15 @@ mkdir -p ~/t3-qqbot && cd ~/t3-qqbot
 
 ---
 
-## 4. 交互式安装向导与配置菜单
+## 4. 交互式安装向导、扫码绑定与配置菜单
 
-直接运行初始化向导（会自动探测本机 T3 Code，并按步骤询问 QQ 凭据、端口、群聊 `@`、回复后自动收起侧边栏、可选补丁静音线程 ID、可选立即绑定以及**是否一键注册开机自启与后台自守护**）：
+直接运行初始化向导（支持**手机 QQ 终端扫码一键绑定**，直接拿到 `AppID`、`AppSecret` 和你的 `user_openid`，省去手抄密钥和查 openid 的步骤；同时引导配置端口、斜杠指令面板、群聊 `@`、侧边栏自动收纳、项目绑定以及**一键注册开机自启与后台自守护**）：
 
 ```bash
 t3-qqbot init
 ```
 
+- 也可以随时单独运行 `t3-qqbot login` 扫码重新绑定 QQ 机器人。
 - 自动化脚本或无需交互时，加 `--yes`（或 `-y`）直接生成默认配置：`t3-qqbot init --yes`。
 - 以后随时想改任何一项配置，运行 `t3-qqbot config` 即可再次打开完整交互式配置菜单：
 - `[1]` QQ Bot 凭据（`AppID` / `AppSecret` / 重新生成随机 `bridgeSecret`）
@@ -353,6 +354,7 @@ t3-qqbot service uninstall
 | `bridge.maxMessageChars` | `1600` | 单条 QQ 回复最大字符数（范围 `100`~`4000`，超出自动分段） |
 | `bridge.proactiveBackgroundReports` | `false` | 异步子任务超过 QQ 被动回复窗口时是否使用主动消息推送（需账号具备权限） |
 | `bridge.autoSettleThread` | `false` | 每轮回复结束后自动调用 `t3_thread_organize(settle)` 收起 T3 侧边栏活跃状态（官方 T3 直接支持；不屏蔽手机完成推送） |
+| `bridge.enableSlashCommands` | `true` | 是否启用 QQ 聊天内斜杠指令面板（`/help`、`/model`、`/think`、`/provider`、`/new`、`/threads`、`/use`、`/rewind`、`/stop`、`/update` 等） |
 | `t3.muteMobileCompletionThreadId` | 省略 | 可选主会话 `threadId`，用于在配置菜单导出 `T3CODE_MUTE_MOBILE_COMPLETION_THREAD_ID`（需配合支持该环境变量的补丁/自编译 T3 服务端，官方原版暂未内置） |
 | `gateway.requireMentionInGroup` | `true` | 群聊是否要求 `@机器人` 才转发 |
 | `gateway.stripPrefix` | `""` | 可选指令前缀过滤（如设 `"/ai"` 则自动剥离消息开头的 `/ai`） |

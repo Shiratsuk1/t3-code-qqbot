@@ -158,6 +158,7 @@ if (process.argv.includes('--package')) {
     bin: pkg.bin,
     scripts: {
       start: 'node dist/cli.mjs start',
+      login: 'node dist/cli.mjs login',
       config: 'node dist/cli.mjs config',
       service: 'node dist/cli.mjs service',
       bridge: 'node dist/cli.mjs bridge',

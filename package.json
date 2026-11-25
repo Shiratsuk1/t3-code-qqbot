@@ -1,6 +1,6 @@
 {
   "name": "t3-code-qqbot",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Cross-platform (Windows & Linux) QQ Bot bridge and media MCP plugin for T3 Code",
   "license": "MIT",
   "author": "Shiratsuk1",
@@ -49,6 +49,7 @@
     "prepublishOnly": "npm run typecheck && npm test && npm run build",
     "test": "node --test test/*.test.ts",
     "start": "node dist/cli.mjs start",
+    "login": "node dist/cli.mjs login",
     "config": "node dist/cli.mjs config",
     "service": "node dist/cli.mjs service",
     "bridge": "node dist/cli.mjs bridge",
@@ -57,6 +58,7 @@
     "doctor": "node dist/cli.mjs doctor"
   },
   "dependencies": {
+    "@tencent-connect/qqbot-connector": "^1.2.0",
     "@tencent-connect/qqbot-nodejs": "1.0.5",
     "ws": "^8.18.0"
   },

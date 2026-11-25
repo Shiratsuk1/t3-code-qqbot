@@ -39,14 +39,15 @@ export type McpRequest = {
 };
 
 async function resolveBindingThreadId(config: ResolvedPluginConfig, binding: ResolvedBinding): Promise<string | undefined> {
-  if (binding.threadId) return binding.threadId;
+  // Prefer runtime thread override (created by /new, /use, or /rewind) over static config binding.threadId
   const persisted = await readFile(join(config.stateDir, 'bindings', `${binding.scopeHash}.thread`), 'utf8').catch(
     error => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
       throw error;
     },
   );
-  return persisted.trim() || undefined;
+  if (persisted.trim()) return persisted.trim();
+  return binding.threadId;
 }
 
 export function createMediaPublisher(config: ResolvedPluginConfig) {

@@ -18,6 +18,12 @@ import {
   mimeFromExtension,
   saveAttachment,
 } from './protocol.ts';
+import {
+  createSlashCommandHandler,
+  parseSlashCommand,
+  readActiveThreadOverride,
+  writeActiveThreadOverride,
+} from './slash-commands.ts';
 import { T3Cli } from './t3-cli.ts';
 import { dispatchMessage, readReply, TERMINAL_RUN_STATUSES } from './t3-ws.ts';
 import type {
@@ -152,17 +158,16 @@ export async function createBridgeRuntime(
     console.info('QQ_T3_TIMING', stage, key, runId, Date.now(), ...details);
 
   async function resolveThreadForBinding(binding: ResolvedBinding, scope: string): Promise<string> {
+    // Prefer runtime thread override created by /new, /use, or /rewind
+    const override = await readActiveThreadOverride(root, binding.scopeHash);
+    if (override) return override;
     if (binding.threadId) return binding.threadId;
     const existingLock = threadLocks.get(binding.scopeHash);
     if (existingLock) return existingLock;
 
     const promise = (async () => {
-      const bindingFile = join(root, 'bindings', `${binding.scopeHash}.thread`);
-      const persisted = await readFile(bindingFile, 'utf8').catch(error => {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
-        throw error;
-      });
-      if (persisted.trim()) return persisted.trim();
+      const persisted = await readActiveThreadOverride(root, binding.scopeHash);
+      if (persisted) return persisted;
 
       const { projects } = await observer.call<{ projects: ProjectListItem[] }>('t3_project_list', { limit: 100 });
       const project = projects.find(row => samePath(row.workspaceRoot, binding.workspace));
@@ -177,7 +182,7 @@ export async function createBridgeRuntime(
         ...(binding.modelSelection ? { modelSelection: binding.modelSelection } : {}),
       });
       if (!created?.threadId) throw new Error('T3 did not return threadId when auto-creating a thread');
-      await writeFile(bindingFile, created.threadId + '\n', { mode: 0o600 });
+      await writeActiveThreadOverride(root, binding.scopeHash, created.threadId);
       console.info('Auto-created T3 thread for scope', `sha256:${binding.scopeHash.slice(0, 12)}`, created.threadId);
       return created.threadId;
     })();
@@ -186,6 +191,31 @@ export async function createBridgeRuntime(
     void promise.catch(() => threadLocks.delete(binding.scopeHash));
     return promise;
   }
+
+  async function sendChunkedReply(reply: ReplyAddress, text: string): Promise<void> {
+    const chars = Array.from(text);
+    const maxChars = config.bridge.maxMessageChars;
+    for (let offset = 0; offset < chars.length; offset += maxChars) {
+      await qq.sendText(reply, chars.slice(offset, offset + maxChars).join(''));
+    }
+  }
+
+  const runSlashForReply = (reply: ReplyAddress) =>
+    createSlashCommandHandler({
+      config,
+      observer,
+      stateDir: root,
+      sendReply: text => sendChunkedReply(reply, text),
+      resolveActiveThread: (binding, scope) => resolveThreadForBinding(binding, scope),
+      setActiveThreadOverride: async (binding, nextThreadId) => {
+        threadLocks.delete(binding.scopeHash);
+        await writeActiveThreadOverride(root, binding.scopeHash, nextThreadId);
+      },
+      triggerGracefulRestart: () => {
+        console.info('Triggering graceful restart after /update...');
+        process.kill(process.pid, 'SIGTERM');
+      },
+    });
 
   async function relayBackground(
     threadId: string,
@@ -422,6 +452,24 @@ export async function createBridgeRuntime(
     if (!event.content?.trim() && !event.attachments?.length) {
       await qq.sendText(reply, '请输入消息正文，或附上要发送的文件。');
       return;
+    }
+
+    if (config.bridge.enableSlashCommands) {
+      const slash = parseSlashCommand(event.content ?? '', Boolean(event.attachments?.length));
+      if (slash) {
+        try {
+          const outcome = await runSlashForReply(reply)(slash, binding, scope);
+          if (outcome === 'handled') {
+            console.info('QQ slash command handled', slash.name, key);
+            return;
+          }
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          console.error('QQ slash command failed', slash.name, msg);
+          await qq.sendText(reply, `指令 /${slash.name} 执行失败：${msg}`).catch(() => {});
+          return;
+        }
+      }
     }
 
     const rawAttachments = event.attachments ?? [];

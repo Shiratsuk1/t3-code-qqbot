@@ -18,6 +18,8 @@ flowchart LR
 ## 核心特性
 
 - **双平台原生兼容**：支持 Windows 10/11（自动解析 `%USERPROFILE%\.t3\bin\t3.cmd` Electron 包装与独立 `t3.exe`）与 Linux（自动探测 `~/.t3/bin/t3`、`~/.local/bin/t3` 及 `PATH`）。
+- **终端扫码一键接入**：内置 `@tencent-connect/qqbot-connector`，`t3-qqbot init` / `t3-qqbot login` 支持手机 QQ 扫码直接拿到 `AppID`、`AppSecret` 和 `user_openid`，免去手抄密钥。
+- **QQ 聊天内全套斜杠指令面板**：手机端直接发 `/model`（支持 `4n`/`4c`/`4a`/`4h`/`3.8f`/`sonnet`/`opus`/`sol` 等超短简写与跨 Provider 切换）、`/think`、`/provider`、`/new`、`/threads`、`/use`、`/rewind`（`/undo`/`/撤回`）、`/compact`、`/status`、`/tasks`、`/cancel`（`/stop`）、`/update`、`/help`。
 - **原生 T3 协议链路**：直接通过 T3 原生 WebSocket（`message.dispatch` + `orchestration.subscribeThread`）投递与订阅回复，不向聊天正文拼接任何多余标记；私聊支持 QQ 官方 `StreamSession` 实时流式输出，首帧失败自动降级普通消息。
 - **双向富媒体与附件**：
   - 入站：支持 QQ 图片、语音、普通文件自动下载落盘（HTTPS 域名白名单 + 文件头嗅探 + 单件 12 MiB / 单消息 10 件上限），并通过 T3 原生附件接口上传给模型。
@@ -55,7 +57,7 @@ t3-qqbot service install
 
 ### 方式二：下载 GitHub Release 离线发布包
 
-从 Releases 下载 `t3-code-qqbot-v1.1.0.zip`（Windows）或 `t3-code-qqbot-v1.1.0.tar.gz`（Linux），解压后执行：
+从 Releases 下载 `t3-code-qqbot-v1.2.0.zip`（Windows）或 `t3-code-qqbot-v1.2.0.tar.gz`（Linux），解压后执行：
 
 ```bash
 npm ci --omit=dev
@@ -64,11 +66,31 @@ node dist/cli.mjs init
 
 > **提示**：如果你是通过 `git clone` 克隆源码仓库，请先执行 `npm ci && npm run build` 生成 `dist/`，再运行上述命令。
 
+## QQ 聊天内斜杠指令面板
+
+在已绑定的 QQ 私聊或群聊 `@机器人` 中直接发送（可在 `t3-qqbot config` 关闭 `bridge.enableSlashCommands`）：
+
+| 指令（含别名） | 示例 | 说明 |
+|---|---|---|
+| `/help` (`/?`, `/menu`) | `/help` | 查看全部快捷指令清单 |
+| `/model` (`/m`) | `/model` · `/model 4h xhigh` · `/model 3.8f` · `/model codex/sol` | 查看当前 Provider 可用模型编号，或自适应简写/编号/跨 Provider 切换模型 |
+| `/think` (`/t`) | `/think low` (`/t l`) · `/think xh` | 切换思考/推理强度（自动适配 Antigravity / Codex / Claude 档位键） |
+| `/provider` (`/p`) | `/provider` · `/provider 2` | 查看或切换当前会话的 T3 Provider 账号实例 |
+| `/new` (`/reset`) | `/new 新话题` | 在当前项目开新 T3 会话（自动继承模型与思考强度），旧会话完整保留 |
+| `/threads` (`/list`) | `/threads` | 列出当前项目最近 10 条 T3 会话（带编号） |
+| `/use` (`/switch`) | `/use 2` · `/use main` | 切换到指定历史会话或一键切回配置默认主会话 |
+| `/rewind` (`/undo`, `/撤回`) | `/rewind` · `/撤回 2` | 基于 T3 原生 `fork` 从最近 1-10 轮前安全分支回溯，清除误触发/污染轮次 |
+| `/compact` | `/compact 保留关键结论` | 透传给当前 T3 会话执行原生上下文压缩 |
+| `/status` (`/info`) | `/status` | 查看当前会话 ID、Provider、模型、运行状态与后台任务数 |
+| `/tasks` & `/cancel` (`/stop`) | `/tasks` · `/stop` · `/cancel all` | 查看后台任务，或立即中断当前轮次/取消委派子任务 |
+| `/update` (`/upgrade`) | `/update` | 检查 GitHub 最新版并在源码模式下自动拉取重建与热重启 |
+
 ## CLI 命令一览
 
 | 命令 | 说明 |
 |---|---|
-| `t3-qqbot init [--dir <dir>] [--force] [--yes]` | 交互式安装向导（依次引导凭据、可选项、绑定与一键开机自启动；`--yes` 静默生成默认配置） |
+| `t3-qqbot init [--dir <dir>] [--force] [--yes]` | 交互式安装向导（扫码/手动填凭据、可选项、绑定与一键开机自启动；`--yes` 静默生成默认配置） |
+| `t3-qqbot login [--config <path>]` | 终端扫码一键绑定 QQ 机器人（自动保存 `AppID`/`AppSecret` 并输出 `c2c:<user_openid>`） |
 | `t3-qqbot config [show\|set <key> <val>] [--config <path>]` | 打开交互式配置菜单（凭据/T3/桥接/绑定/白名单/静音与收纳/守护服务/体检），或非交互读写单项配置 |
 | `t3-qqbot start [--config <path>] [--supervise]` | 单机模式：自动依次启动 `bridge` 与 `gateway`（`--supervise` 崩溃自动指数退避重启） |
 | `t3-qqbot service <install\|status\|start\|stop\|restart\|uninstall>` | 一键注册与管理本机后台自守护（Windows 无黑框计划任务 / Linux `systemd --user`） |
