@@ -48,7 +48,7 @@ src/
 scripts/
   build.mjs           esbuild 构建 dist/*.mjs、语法检查与 --package 双平台离线归档（.zip / .tar.gz）
   install-windows-task.ps1 / start-windows.ps1 / t3-code-qqbot.service  手工部署脚本模板
-test/                 10 套原生 node:test 单元测试套件（当前 39 项用例）
+test/                 10 套原生 node:test 单元测试套件（当前 40 项用例）
 docs/                 完整中文文档（SETUP.md / ARCHITECTURE.md / OPERATIONS.md）
 ```
 

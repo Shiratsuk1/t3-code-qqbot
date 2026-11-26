@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import {
   DEFAULT_ATTACHMENT_HOSTS,
+  LEGACY_DEFAULT_ATTACHMENT_HOSTS,
   findBindingForScope,
   isLoopbackOrigin,
   isSameOrInsidePath,
@@ -62,6 +63,20 @@ test('parseConfig resolves relative paths, normalizes hosts, validates bounds, a
     basePath,
   );
   assert.deepEqual(defaultHosts.attachmentHosts, DEFAULT_ATTACHMENT_HOSTS);
+  assert.ok(defaultHosts.attachmentHosts.includes('qqbot.ugcimg.cn'));
+
+  const upgradedLegacyHosts = parseConfig(
+    {
+      stateDir: './state',
+      t3: { origin: 'http://127.0.0.1:3773' },
+      bridge: { port: 18773 },
+      attachmentHosts: [...LEGACY_DEFAULT_ATTACHMENT_HOSTS, 'custom.cdn.example.com'],
+      bindings: [],
+    },
+    basePath,
+  );
+  assert.ok(upgradedLegacyHosts.attachmentHosts.includes('qqbot.ugcimg.cn'));
+  assert.ok(upgradedLegacyHosts.attachmentHosts.includes('custom.cdn.example.com'));
 
   assert.throws(
     () =>

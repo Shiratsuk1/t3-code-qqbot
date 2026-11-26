@@ -5,11 +5,14 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { detectExtension, digest, mimeFromExtension, safeArtifact, saveAttachment } from '../src/protocol.ts';
 
-test('detectExtension sniffs png, jpg, wav, silk, and falls back cleanly', () => {
+test('detectExtension sniffs png, jpg, wav, silk, amr, mp3, ogg, and falls back cleanly', () => {
   assert.equal(detectExtension(Buffer.from('89504e470d0a1a0a0000', 'hex'), 'unknown'), 'png');
   assert.equal(detectExtension(Buffer.from('ffd8ffe000104a46', 'hex'), 'unknown'), 'jpg');
   assert.equal(detectExtension(Buffer.from('RIFF1234WAVEfmt '), 'voice'), 'wav');
   assert.equal(detectExtension(Buffer.from('\x02#!SILK_V3abc'), 'voice'), 'silk');
+  assert.equal(detectExtension(Buffer.from('#!AMR\nabc'), 'voice'), 'amr');
+  assert.equal(detectExtension(Buffer.from('ID3\x03\x00\x00'), 'voice'), 'mp3');
+  assert.equal(detectExtension(Buffer.from('OggS\x00\x02'), 'voice'), 'ogg');
   assert.equal(detectExtension(Buffer.from('hello world'), 'report.pdf'), 'pdf');
   assert.equal(detectExtension(Buffer.from('hello world'), 'weird.ext!@#'), 'bin');
 });
@@ -48,8 +51,8 @@ test('safeArtifact allows files inside workspace and blocks traversal and UNC pa
   }
 });
 
-test('saveAttachment rejects non-https and non-allowlisted hosts', async () => {
-  const hosts = new Set(['multimedia.nt.qq.com']);
+test('saveAttachment rejects non-https and non-allowlisted hosts, and validates redirects within allowlist', async () => {
+  const hosts = new Set(['multimedia.nt.qq.com', 'qqbot.ugcimg.cn']);
   await assert.rejects(
     () => saveAttachment({ url: 'http://multimedia.nt.qq.com/a.png' }, tmpdir(), 0, hosts),
     /Unrecognized QQ attachment origin/,
@@ -58,4 +61,36 @@ test('saveAttachment rejects non-https and non-allowlisted hosts', async () => {
     () => saveAttachment({ url: 'https://evil.example.com/a.png' }, tmpdir(), 0, hosts),
     /Unrecognized QQ attachment origin/,
   );
+
+  const dir = await mkdtemp(join(tmpdir(), 't3-qqbot-voice-'));
+  try {
+    const wavBytes = Buffer.from('RIFF1234WAVEfmt 0000');
+    const allowlistedRedirectFetch: typeof fetch = async input => {
+      const target = String(input);
+      if (target === 'https://qqbot.ugcimg.cn/voice/initial') {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'https://multimedia.nt.qq.com/voice/final' },
+        });
+      }
+      return new Response(wavBytes, { status: 200 });
+    };
+    const saved = await saveAttachment(
+      { url: 'qqbot.ugcimg.cn/voice/initial', filename: 'voice' },
+      dir,
+      0,
+      hosts,
+      allowlistedRedirectFetch,
+    );
+    assert.equal(saved.format, 'wav');
+
+    const evilRedirectFetch: typeof fetch = async () =>
+      new Response(null, { status: 302, headers: { location: 'https://evil.example.com/steal.wav' } });
+    await assert.rejects(
+      () => saveAttachment({ url: 'https://qqbot.ugcimg.cn/voice/bad' }, dir, 1, hosts, evilRedirectFetch),
+      /Unrecognized QQ attachment origin/,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

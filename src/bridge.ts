@@ -46,6 +46,7 @@ import {
 } from './t3-ws.ts';
 import type { NativeModelSelection } from './t3-ws.ts';
 import type {
+  Attachment,
   Credentials,
   InboundEvent,
   NativeAttachment,
@@ -55,6 +56,31 @@ import type {
   ResolvedPluginConfig,
   Target,
 } from './types.ts';
+
+export function buildInboundMessageText(
+  content: string | undefined,
+  attachments: readonly Attachment[],
+  uploadedAttachments: readonly Pick<NativeAttachment, 'mimeType'>[] = [],
+): string {
+  const trimmed = (content ?? '').trim();
+  const transcripts = attachments
+    .map(att => att.asr_refer_text?.trim() ?? '')
+    .filter(Boolean);
+  const voiceBlock =
+    transcripts.length === 0
+      ? ''
+      : transcripts.length === 1
+        ? `[语音转写参考] ${transcripts[0]}`
+        : transcripts.map((t, idx) => `[语音 ${idx + 1} 转写参考] ${t}`).join('\n');
+
+  if (trimmed && voiceBlock) return `${trimmed}\n\n${voiceBlock}`;
+  if (trimmed) return trimmed;
+  if (voiceBlock) return voiceBlock;
+  if (uploadedAttachments.some(att => att.mimeType.toLowerCase().startsWith('audio/'))) {
+    return '[语音消息]';
+  }
+  return '';
+}
 
 class ReplyStreamApi extends MessageApi {
   readonly key: string;
@@ -615,11 +641,44 @@ export async function createBridgeRuntime(
         const files: { path: string }[] = [];
         for (let index = 0; index < rawAttachments.length; index++) {
           const item = rawAttachments[index];
-          const saved =
-            item.stagedName && config.bridge.testStaging
-              ? await copyStagedAttachment(config.bridge.testStaging, item.stagedName, attachmentDir, index)
-              : await saveAttachment(item, attachmentDir, index, allowedHosts);
-          files.push(saved);
+          if (item.stagedName && config.bridge.testStaging) {
+            files.push(await copyStagedAttachment(config.bridge.testStaging, item.stagedName, attachmentDir, index));
+            continue;
+          }
+          try {
+            files.push(await saveAttachment(item, attachmentDir, index, allowedHosts));
+          } catch (primaryError) {
+            if (item.fallback_url) {
+              console.warn(
+                'Primary QQ attachment download failed, retrying fallback URL',
+                key,
+                primaryError instanceof Error ? primaryError.message : String(primaryError),
+              );
+              try {
+                files.push(await saveAttachment({ ...item, url: item.fallback_url }, attachmentDir, index, allowedHosts));
+                continue;
+              } catch (fallbackError) {
+                if (item.asr_refer_text?.trim()) {
+                  console.warn(
+                    'Fallback QQ voice download failed, continuing with ASR transcript only',
+                    key,
+                    fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+                  );
+                  continue;
+                }
+                throw fallbackError;
+              }
+            }
+            if (item.asr_refer_text?.trim()) {
+              console.warn(
+                'QQ voice attachment download failed, continuing with ASR transcript only',
+                key,
+                primaryError instanceof Error ? primaryError.message : String(primaryError),
+              );
+              continue;
+            }
+            throw primaryError;
+          }
         }
 
         threadId = await resolveThreadForBinding(binding, scope);
@@ -627,13 +686,14 @@ export async function createBridgeRuntime(
           const mime = mimeFromExtension(file.path);
           uploadedAttachments.push(await observer.upload(file.path, basename(file.path), mime));
         }
+        const dispatchText = buildInboundMessageText(event.content, rawAttachments, uploadedAttachments);
         accepted = await t3Cli.withSession(
           { scopes: ['orchestration:read', 'orchestration:operate'], ttl: '2m', label: 'T3 QQBot delivery' },
           token =>
             dispatchMessage(config.t3.origin, token, {
               threadId,
               key,
-              text: event.content ?? '',
+              text: dispatchText,
               attachments: uploadedAttachments,
             }),
         );

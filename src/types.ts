@@ -11,8 +11,10 @@ export type ReplyAddress = {
 
 export type Attachment = {
   url?: string;
+  fallback_url?: string;
   content_type?: string;
   filename?: string;
+  asr_refer_text?: string;
   stagedName?: string;
 };
 

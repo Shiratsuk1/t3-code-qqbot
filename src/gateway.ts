@@ -14,7 +14,11 @@ function stripCommandPrefix(text: string, prefix: string): string {
 
 function normalizeAttachmentUrl(rawUrl: string): string {
   const trimmed = rawUrl.trim();
-  return trimmed.startsWith('//') ? `https:${trimmed}` : trimmed;
+  if (trimmed.startsWith('//')) return `https:${trimmed}`;
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed) && /^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(\/|$)/.test(trimmed)) {
+    return `https://${trimmed}`;
+  }
+  return trimmed;
 }
 
 export async function startGateway(
@@ -72,16 +76,26 @@ export async function startGateway(
       ...(message.attachments ?? []),
       ...(message.msgElements ?? []).flatMap(item => item.attachments ?? []),
     ];
-    const deduped = new Map<string, { url: string; content_type?: string; filename?: string }>();
+    const deduped = new Map<
+      string,
+      { url: string; fallback_url?: string; content_type?: string; filename?: string; asr_refer_text?: string }
+    >();
     for (const item of rawAttachments) {
-      const rawUrl = item.voice_wav_url?.trim() || item.url?.trim();
+      const voiceWavUrl = item.voice_wav_url?.trim();
+      const baseUrl = item.url?.trim();
+      const rawUrl = voiceWavUrl || baseUrl;
       if (!rawUrl) continue;
       const normalizedUrl = normalizeAttachmentUrl(rawUrl);
+      const normalizedFallback =
+        voiceWavUrl && baseUrl && voiceWavUrl !== baseUrl ? normalizeAttachmentUrl(baseUrl) : undefined;
+      const asrReferText = item.asr_refer_text?.trim() || undefined;
       if (!deduped.has(normalizedUrl)) {
         deduped.set(normalizedUrl, {
           url: normalizedUrl,
+          ...(normalizedFallback && normalizedFallback !== normalizedUrl ? { fallback_url: normalizedFallback } : {}),
           content_type: item.content_type,
           filename: item.filename,
+          ...(asrReferText ? { asr_refer_text: asrReferText } : {}),
         });
       }
     }

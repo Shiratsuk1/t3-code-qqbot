@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { createBridgeRuntime, startTypingKeepalive } from '../src/bridge.ts';
+import { buildInboundMessageText, createBridgeRuntime, startTypingKeepalive } from '../src/bridge.ts';
 import { parseConfig } from '../src/config.ts';
 
 test('bridge HTTP server enforces auth, validates events, and accepts bound scopes', async () => {
@@ -116,4 +116,27 @@ test('startTypingKeepalive fires immediately for C2C, refreshes on interval, ski
   await new Promise(resolve => setTimeout(resolve, 35));
   stopGroup();
   assert.equal(groupCalls, 0);
+});
+
+test('buildInboundMessageText preserves QQ voice ASR transcripts and falls back cleanly for audio-only turns', () => {
+  assert.equal(
+    buildInboundMessageText('', [{ url: 'https://qqbot.ugcimg.cn/a.wav', asr_refer_text: '你好呀' }], [
+      { mimeType: 'audio/wav' },
+    ]),
+    '[语音转写参考] 你好呀',
+  );
+  assert.equal(
+    buildInboundMessageText('附言', [{ url: 'https://qqbot.ugcimg.cn/a.wav', asr_refer_text: '第一段' }], [
+      { mimeType: 'audio/wav' },
+    ]),
+    '附言\n\n[语音转写参考] 第一段',
+  );
+  assert.equal(
+    buildInboundMessageText('', [{ url: 'https://qqbot.ugcimg.cn/a.wav' }], [{ mimeType: 'audio/wav' }]),
+    '[语音消息]',
+  );
+  assert.equal(
+    buildInboundMessageText('', [{ url: 'https://multimedia.nt.qq.com.cn/a.png' }], [{ mimeType: 'image/png' }]),
+    '',
+  );
 });

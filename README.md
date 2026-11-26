@@ -34,7 +34,7 @@ flowchart LR
 | [完整配置教程（docs/SETUP.md）](./docs/SETUP.md) | 从 0 开始建号、扫码绑定、附件回传、守护常驻与双机分离部署 |
 | [系统架构与协议（docs/ARCHITECTURE.md）](./docs/ARCHITECTURE.md) | 进程拓扑、T3 原生 WebSocket 协议、流式保活、`/update` 与 Windows 零窗口原理 |
 | [运维、排障与发版手册（docs/OPERATIONS.md）](./docs/OPERATIONS.md) | 守护管理、无窗口核验命令、断点补发（`recover`）与标准发版 SOP |
-| [更新日志（CHANGELOG.md）](./CHANGELOG.md) | `v1.0.0` ~ `v1.2.4` 完整简体中文版本演进记录 |
+| [更新日志（CHANGELOG.md）](./CHANGELOG.md) | `v1.0.0` ~ `v1.2.5` 完整简体中文版本演进记录 |
 | [安全策略（SECURITY.md）](./SECURITY.md) · [贡献指南（CONTRIBUTING.md）](./CONTRIBUTING.md) | 安全边界声明、开发规范与提交流程 |
 
 ## 3 分钟快速开始
@@ -67,7 +67,7 @@ t3-qqbot service install
 
 ### 方式二：下载 GitHub Release 离线发布包
 
-从 Releases 下载 `t3-code-qqbot-v1.2.4.zip`（Windows）或 `t3-code-qqbot-v1.2.4.tar.gz`（Linux），解压后执行：
+从 Releases 下载 `t3-code-qqbot-v1.2.5.zip`（Windows）或 `t3-code-qqbot-v1.2.5.tar.gz`（Linux），解压后执行：
 
 ```bash
 npm ci --omit=dev

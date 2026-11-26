@@ -4,6 +4,20 @@
 
 ---
 
+## [v1.2.5] — 2026-11-26
+
+### 修复与增强
+- **修复 QQ 语音消息因 CDN 域名不在白名单被拦截的问题（`Unrecognized QQ attachment origin: qqbot.ugcimg.cn`）**：
+  - 将腾讯官方 QQ 机器人语音 WAV 转码 CDN 域名 `qqbot.ugcimg.cn` 加入默认附件域名白名单 `DEFAULT_ATTACHMENT_HOSTS` 及 `config.example.json`；
+  - 对存量已由旧版 `init` 写入旧 4 个默认域名的 `config.json`，`parseConfig` 自动无感补齐 `qqbot.ugcimg.cn`（同时严格保留用户主动收紧的自定义子集白名单）。
+- **语音入站链路全面加固**：
+  - `gateway.ts` 补齐裸域名 URL 规范化，透传 QQ 自带语音转文字 `asr_refer_text`，并在 `voice_wav_url` 与原始 `url` 不同时保留 `fallback_url`；
+  - `protocol.ts` 新增 `.amr`/`.ogg`/`.m4a`/`.aac`/`.flac`/`.webm` 音频 MIME 与 `AMR`/`MP3`/`OGG` 文件头魔数嗅探，并支持最多 2 次严格校验白名单与 HTTPS 的安全重定向；
+  - `bridge.ts` 在继续上传原生 `.wav` 音频附件的同时，自动附带 `[语音转写参考]` 或纯语音兜底文本 `[语音消息]`（兼容不支持原生音频输入的后端），主链接拉取失败时依次自动回退 `fallback_url` 或转写文本。
+- 新增配置升级、音频魔数、白名单重定向及语音文本组装测试（总计 40 项用例全通）。
+
+---
+
 ## [v1.2.4] — 2026-11-25
 
 ### 新增与改进

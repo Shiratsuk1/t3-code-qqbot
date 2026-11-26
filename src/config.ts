@@ -10,14 +10,19 @@ import type {
   ResolvedPluginConfig,
 } from './types.ts';
 
-export const APP_VERSION = '1.2.4';
+export const APP_VERSION = '1.2.5';
 export const SELF_UPDATE_EXIT_CODE = 75;
 
-export const DEFAULT_ATTACHMENT_HOSTS = [
+export const LEGACY_DEFAULT_ATTACHMENT_HOSTS = [
   'multimedia.nt.qq.com.cn',
   'multimedia.nt.qq.com',
   'gchat.qpic.cn',
   'c2cpicdw.qpic.cn',
+];
+
+export const DEFAULT_ATTACHMENT_HOSTS = [
+  ...LEGACY_DEFAULT_ATTACHMENT_HOSTS,
+  'qqbot.ugcimg.cn',
 ];
 
 export const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
@@ -134,6 +139,18 @@ export function parseConfig(raw: RawPluginConfig, configPath: string): ResolvedP
 
   const bridgeUrl = raw.gateway?.bridgeUrl?.trim() || `http://${host === '::1' ? '[::1]' : host}:${port}/events`;
 
+  const configuredHosts =
+    Array.isArray(raw.attachmentHosts) && raw.attachmentHosts.length > 0
+      ? [...new Set(raw.attachmentHosts.map(h => String(h).trim().toLowerCase()).filter(Boolean))]
+      : [];
+  const configuredHostSet = new Set(configuredHosts);
+  const attachmentHosts =
+    configuredHosts.length === 0
+      ? [...DEFAULT_ATTACHMENT_HOSTS]
+      : LEGACY_DEFAULT_ATTACHMENT_HOSTS.every(host => configuredHostSet.has(host))
+        ? [...new Set([...configuredHosts, ...DEFAULT_ATTACHMENT_HOSTS])]
+        : configuredHosts;
+
   return {
     configPath: absConfigPath,
     configDir,
@@ -161,10 +178,7 @@ export function parseConfig(raw: RawPluginConfig, configPath: string): ResolvedP
       requireMentionInGroup: raw.gateway?.requireMentionInGroup ?? true,
       stripPrefix: raw.gateway?.stripPrefix ?? '',
     },
-    attachmentHosts:
-      Array.isArray(raw.attachmentHosts) && raw.attachmentHosts.length > 0
-        ? raw.attachmentHosts.map(h => String(h).trim().toLowerCase()).filter(Boolean)
-        : [...DEFAULT_ATTACHMENT_HOSTS],
+    attachmentHosts,
     bindings,
   };
 }

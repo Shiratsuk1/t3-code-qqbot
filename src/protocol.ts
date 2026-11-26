@@ -21,6 +21,12 @@ const MIME_MAP: Record<string, string> = {
   '.wav': 'audio/wav',
   '.mp3': 'audio/mpeg',
   '.silk': 'audio/silk',
+  '.amr': 'audio/amr',
+  '.ogg': 'audio/ogg',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.flac': 'audio/flac',
+  '.webm': 'audio/webm',
   '.pdf': 'application/pdf',
   '.txt': 'text/plain',
   '.md': 'text/markdown',
@@ -94,18 +100,29 @@ export function detectExtension(bytes: Buffer, fallbackName: string): string {
   ) {
     return 'silk';
   }
+  if (header.length >= 6 && header.toString('ascii', 0, 6) === '#!AMR\n') {
+    return 'amr';
+  }
+  if (header.length >= 3 && header.toString('ascii', 0, 3) === 'ID3') {
+    return 'mp3';
+  }
+  if (header.length >= 4 && header.toString('ascii', 0, 4) === 'OggS') {
+    return 'ogg';
+  }
   const suffix = extname(fallbackName).toLowerCase();
   return /^\.[a-z0-9]{1,12}$/.test(suffix) ? suffix.slice(1) : 'bin';
 }
 
-export async function saveAttachment(
-  item: Attachment,
-  directory: string,
-  index: number,
-  hosts: Set<string>,
-): Promise<{ path: string; format: string }> {
-  if (!item.url) throw new Error('Missing QQ attachment URL');
-  const url = new URL(item.url.startsWith('//') ? `https:${item.url}` : item.url);
+const MAX_ATTACHMENT_REDIRECTS = 2;
+
+function parseAllowedAttachmentUrl(rawUrl: string, hosts: Set<string>): URL {
+  const trimmed = rawUrl.trim();
+  const normalized = trimmed.startsWith('//')
+    ? `https:${trimmed}`
+    : !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed) && /^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(\/|$)/.test(trimmed)
+      ? `https://${trimmed}`
+      : trimmed;
+  const url = new URL(normalized);
   if (
     url.protocol !== 'https:' ||
     url.port ||
@@ -115,10 +132,35 @@ export async function saveAttachment(
   ) {
     throw new Error(`Unrecognized QQ attachment origin: ${url.hostname}`);
   }
-  const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(20_000) });
-  if (!response.ok || !response.body) {
-    await response.body?.cancel().catch(() => {});
-    throw new Error(`QQ attachment HTTP ${response.status}`);
+  return url;
+}
+
+export async function saveAttachment(
+  item: Attachment,
+  directory: string,
+  index: number,
+  hosts: Set<string>,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ path: string; format: string }> {
+  if (!item.url) throw new Error('Missing QQ attachment URL');
+  let currentUrl = parseAllowedAttachmentUrl(item.url, hosts);
+  let response: Response | undefined;
+  for (let hop = 0; hop <= MAX_ATTACHMENT_REDIRECTS; hop++) {
+    response = await fetchImpl(currentUrl, { redirect: 'manual', signal: AbortSignal.timeout(20_000) });
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location');
+      await response.body?.cancel().catch(() => {});
+      if (!location || hop === MAX_ATTACHMENT_REDIRECTS) {
+        throw new Error(`QQ attachment redirect rejected (HTTP ${response.status})`);
+      }
+      currentUrl = parseAllowedAttachmentUrl(new URL(location, currentUrl).href, hosts);
+      continue;
+    }
+    break;
+  }
+  if (!response || !response.ok || !response.body) {
+    await response?.body?.cancel().catch(() => {});
+    throw new Error(`QQ attachment HTTP ${response?.status ?? 0}`);
   }
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -131,7 +173,7 @@ export async function saveAttachment(
     chunks.push(chunk);
   }
   const bytes = Buffer.concat(chunks);
-  const extension = detectExtension(bytes, item.filename ?? url.pathname);
+  const extension = detectExtension(bytes, item.filename ?? currentUrl.pathname);
   const path = join(directory, `${index}-${digest(bytes).slice(0, 12)}.${extension}`);
   await mkdir(directory, { recursive: true });
   await writeFile(path, bytes);
