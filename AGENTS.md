@@ -72,6 +72,7 @@ npm run package
 npm pack --dry-run
 ```
 
+- **修复完成自动提交与推送铁律**：每次完成代码修复或功能改动并通过 `npm run typecheck && npm test && npm run build` 校验后，**必须自动执行 `git commit` 并推送到 `origin/main`**（无需等待用户额外催促），确保所有 git 源码部署节点随时可通过 `/update` 第一时间拉取最新修复；仅当明确需要正式发版（Tag / GitHub Release / npm）时同步更新版本号与离线归档。
 - 发版时须同步更新版本号的 5 处位置：`package.json`、`package-lock.json`、`src/config.ts`（`APP_VERSION`）、`README.md`、`docs/SETUP.md`，并同步追加 `CHANGELOG.md`。
 - GitHub Release 标题与变更说明必须使用简体中文，附带 `release/` 下最新的 `.zip`（Windows）与 `.tar.gz`（Linux）离线包，并保持与 npm（`t3-code-qqbot`）版本号一致。
 

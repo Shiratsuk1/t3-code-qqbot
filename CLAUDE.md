@@ -40,7 +40,7 @@ npm run package
 npm pack --dry-run
 ```
 
-> 改完任意源码后，至少执行 `npm run typecheck && npm test && npm run build` 确认全绿（`Exit Code 0`）再交付。
+> 改完任意源码后，至少执行 `npm run typecheck && npm test && npm run build` 确认全绿（`Exit Code 0`），并**自动 `git commit` + `git push origin main`**，确保所有 git 源码节点随时可通过 `/update` 立即拉取最新修复。
 
 ---
 
