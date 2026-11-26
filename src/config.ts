@@ -33,6 +33,7 @@ export const DEFAULT_ATTACHMENT_HOSTS = [
   'qqbot.ugcimg.cn',
   '*.nt.qq.com.cn',
   '*.nt.qq.com',
+  '*.ftn.qq.com',
   '*.qpic.cn',
   '*.ugcimg.cn',
   '*.gtimg.cn',

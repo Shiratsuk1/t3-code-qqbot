@@ -77,6 +77,7 @@ test('parseConfig resolves relative paths, normalizes hosts, validates bounds, a
   );
   assert.ok(upgradedLegacyHosts.attachmentHosts.includes('qqbot.ugcimg.cn'));
   assert.ok(upgradedLegacyHosts.attachmentHosts.includes('*.nt.qq.com'));
+  assert.ok(upgradedLegacyHosts.attachmentHosts.includes('*.ftn.qq.com'));
   assert.ok(upgradedLegacyHosts.attachmentHosts.includes('custom.cdn.example.com'));
 
   // Attachments config defaults and custom overrides
