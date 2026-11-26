@@ -11,7 +11,7 @@
 - 专有名词、命令行参数、代码符号、配置键名与底层协议字段（如 `T3 Code`、`checkpoint.rollback`、`--files`、`systemd --user`、`wscript.exe`）保留英文原名，其余叙述与步骤一律使用清晰自然的简体中文。
 
 ### 1.2 原生 T3 协议优先（禁止旁路魔改）
-- 所有会话创建、消息投递、流式订阅、模型/思考强度切换、任务中断、侧边栏收纳与回溯撤回，**优先通过 T3 Code 原生 WebSocket（`/ws?orchestrationProtocol=2`）** 完成（如 `message.dispatch`、`orchestration.subscribeThread`、`orchestration.getThreadProjection`、`checkpoint.rollback`、`thread.create`、`thread.model-selection.update`、`thread.stop`、`thread.settle`），默认新建线程权限为 `runtimeMode: 'full-access'`，避免独立 MCP 客户端触发 `runtime_mode_escalation_denied`。
+- 所有会话创建、消息投递、流式订阅、模型/思考强度切换、任务中断、侧边栏收纳与回溯撤回，**优先通过 T3 Code 原生 WebSocket（`/ws?orchestrationProtocol=2`）** 完成（如 `message.dispatch`、`orchestration.subscribeThread`、`orchestration.getThreadProjection`、`checkpoint.rollback`、`thread.create`、`thread.model-selection.set`、`thread.stop`、`thread.settle`），默认新建线程权限为 `runtimeMode: 'full-access'`，避免独立 MCP 客户端触发 `runtime_mode_escalation_denied`。
 - 附件上传与只读能力发现通过官方 T3 MCP（`t3_attachment_prepare_upload`、`t3_attachment_discard`、`orchestrator_capabilities`、`t3_project_list`、`t3_thread_list`、`t3_thread_read`）调用。严禁将其他客户端（如 `agy-qqbot`）的旁路实现硬套到 T3 Code 上。
 
 ### 1.3 Windows 后台守护零窗口铁律
@@ -22,7 +22,7 @@
 ### 1.4 安全边界与隐私零泄漏
 - 桥接 HTTP 服务仅允许监听回环地址（`127.0.0.1` / `localhost` / `::1`），鉴权强制使用 `timingSafeEqual` 校验 `Authorization: Bearer <bridgeSecret>`。
 - T3 通信仅允许连接本地回环 `t3.origin`；派生 `t3` CLI 子进程时强制剥离全部 `QQ_*` 凭据环境变量；临时签发的 T3 会话令牌在任务结束或退出时自动吊销。
-- 入站附件强制 HTTPS + 域名白名单 + 文件头嗅探 + 单件 12 MiB / 单消息 10 件上限；出站媒体 MCP（`qqbot_send_media`）先拦截 UNC / 越界路径，再经 `realpath` 严格限定在绑定工作区内。
+- 入站附件强制 HTTPS + 精确域名/安全子域通配符白名单 + 魔数文件头嗅探 + 流式落盘（默认单件 200 MiB / 单消息 10 件，可在 `config.json` 的 `attachments` 调整；单图 `≤ 10 MiB` 走 T3 原生 `image`、普通文件/视频/大图 `≤ 50 MiB` 走 T3 原生流式 `file`、超过 50 MiB 自动工作区落盘并附本地绝对路径交付）；出站媒体 MCP（`qqbot_send_media`）先拦截 UNC / 越界路径，再经 `realpath` 严格限定在绑定工作区内，并按 QQ 官方 SDK 分类型上限放行（图 30 MiB / 语音 20 MiB / `.mp4` 视频与文件 100 MiB，支持分片上传）。
 - **隐私零泄漏**：严禁在代码、测试、文档、配置样例或发布包中提交任何个人主机名、用户名、私有 IP、真实 AppID/AppSecret、OpenID 或定制服务端补丁。
 
 ---
@@ -47,8 +47,9 @@ src/
   types.ts            全局 TypeScript 类型定义
 scripts/
   build.mjs           esbuild 构建 dist/*.mjs、语法检查与 --package 双平台离线归档（.zip / .tar.gz）
+  verify-live.mjs     面向本机真实 T3 Code Server 的无 Mock 端到端契约实证脚本（npm run verify:live）
   install-windows-task.ps1 / start-windows.ps1 / t3-code-qqbot.service  手工部署脚本模板
-test/                 10 套原生 node:test 单元测试套件（当前 40 项用例）
+test/                 11 套原生 node:test 单元测试套件（当前 44 项用例）
 docs/                 完整中文文档（SETUP.md / ARCHITECTURE.md / OPERATIONS.md）
 ```
 
@@ -68,6 +69,7 @@ docs/                 完整中文文档（SETUP.md / ARCHITECTURE.md / OPERATIO
 ```bash
 npm run typecheck
 npm test
+npm run verify:live   # 本机已启动 T3 Code 时实测原生协议与大文件边界
 npm run package
 npm pack --dry-run
 ```

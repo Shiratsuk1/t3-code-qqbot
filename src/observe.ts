@@ -1,5 +1,8 @@
-import { readFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import { Readable } from 'node:stream';
 import { APP_VERSION } from './config.ts';
+import { DEFAULT_UPLOAD_TIMEOUT_MS, isT3NativeImageMime, T3_MAX_IMAGE_BYTES } from './protocol.ts';
 import type { NativeAttachment } from './types.ts';
 
 export type ThreadReadItem = {
@@ -196,41 +199,56 @@ export class Observer {
     return data;
   }
 
-  async upload(filePath: string, name: string, mimeType: string): Promise<NativeAttachment> {
-    const bytes = await readFile(filePath);
+  async upload(
+    filePath: string,
+    name: string,
+    mimeType: string,
+    options: { forceType?: 'image' | 'file'; timeoutMs?: number } = {},
+  ): Promise<NativeAttachment> {
+    const info = await stat(filePath);
+    const sizeBytes = info.size;
+    const type: 'image' | 'file' =
+      options.forceType ?? (isT3NativeImageMime(mimeType) && sizeBytes <= T3_MAX_IMAGE_BYTES ? 'image' : 'file');
     const attachment = {
       name,
       mimeType,
-      sizeBytes: bytes.length,
-      type: (/^image\/(png|jpeg|webp|gif)$/.test(mimeType) ? 'image' : 'file') as 'image' | 'file',
+      sizeBytes,
+      type,
     };
     const { data: staged, session } = await this.callWithSession<{
       attachmentId: string;
       relativeUrl: string;
       uploadUrl?: string;
     }>('t3_attachment_prepare_upload', { upload: attachment });
+    const fileStream = createReadStream(filePath);
     try {
       const endpoint = new URL(staged.uploadUrl ?? staged.relativeUrl, this.url);
       if (endpoint.origin !== new URL(this.url).origin) {
         throw new Error('Unexpected T3 attachment upload origin');
       }
+      const timeoutMs = options.timeoutMs ?? DEFAULT_UPLOAD_TIMEOUT_MS;
       const response = await fetch(endpoint, {
         method: 'POST',
-        signal: AbortSignal.timeout(30_000),
+        signal: AbortSignal.timeout(timeoutMs),
         redirect: 'error',
         headers: {
           Authorization: `Bearer ${session.token}`,
           'Content-Type': mimeType,
+          'Content-Length': String(sizeBytes),
         },
-        body: bytes,
-      });
+        body: Readable.toWeb(fileStream) as NonNullable<RequestInit['body']>,
+        duplex: 'half',
+      } as RequestInit);
       if (!response.ok) {
-        await response.body?.cancel().catch(() => {});
-        throw new Error(`T3 native attachment upload HTTP ${response.status}`);
+        const detail = await response.text().catch(() => '');
+        throw new Error(
+          `T3 native attachment upload HTTP ${response.status}${detail.trim() ? `: ${detail.trim().slice(0, 200)}` : ''}`,
+        );
       }
       await response.body?.cancel().catch(() => {});
       return { ...attachment, id: staged.attachmentId };
     } catch (error) {
+      fileStream.destroy();
       await this.call('t3_attachment_discard', { attachmentId: staged.attachmentId }).catch(() => {});
       throw error;
     }

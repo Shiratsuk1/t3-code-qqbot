@@ -30,6 +30,9 @@ npm run typecheck
 # 运行全量单元测试（test/*.test.ts）
 npm test
 
+# 面向本机真实 T3 Code 运行无 Mock 端到端契约实证（需本机 T3 Code 已运行）
+npm run verify:live
+
 # 构建 dist/*.mjs 并执行 node --check 语法检验
 npm run build
 

@@ -229,7 +229,7 @@ export function formatSlashHelpText(): string {
     '• /compact [保留重点] — 透传给当前 T3 会话执行原生上下文压缩',
     '• /status — 查看当前会话 ID、Provider、模型档位、运行状态与后台任务（别名 /info）',
     '• /tasks & /cancel [taskId|all] — 查看后台任务，或中断当前轮次/取消子任务（别名 /stop）',
-    '• /update — 检查 GitHub 最新版本并在源码仓库模式下自动拉取重建重启（别名 /upgrade）',
+    '• /update — 检查最新版本并按安装形态热重启更新（支持 npm 全局 / 离线包 / git 源码，别名 /upgrade）',
   ].join('\n');
 }
 
@@ -403,10 +403,18 @@ export function resolveModelFromInput(
   return {};
 }
 
+export type ThreadListRow = {
+  threadId: string;
+  title?: string | null;
+  status?: string;
+  updatedAt?: string;
+};
+
 export type SlashHandlerDeps = {
   config: ResolvedPluginConfig;
   observer: Observer;
   stateDir: string;
+  recentThreadsCache?: Map<string, ThreadListRow[]>;
   sendReply: (text: string) => Promise<void>;
   resolveActiveThread: (binding: ResolvedBinding, scope: string) => Promise<string>;
   setActiveThreadOverride: (binding: ResolvedBinding, threadId: string | null) => Promise<void>;
@@ -422,15 +430,8 @@ export type SlashHandlerDeps = {
   triggerGracefulRestart?: () => void;
 };
 
-type ThreadListRow = {
-  threadId: string;
-  title?: string | null;
-  status?: string;
-  updatedAt?: string;
-};
-
 export function createSlashCommandHandler(deps: SlashHandlerDeps) {
-  const recentThreadsCache = new Map<string, ThreadListRow[]>();
+  const recentThreadsCache = deps.recentThreadsCache ?? new Map<string, ThreadListRow[]>();
 
   const findProject = async (workspace: string): Promise<ProjectListItem> => {
     const { projects } = await deps.observer.call<{ projects: ProjectListItem[] }>('t3_project_list', { limit: 100 });
@@ -790,9 +791,18 @@ export function createSlashCommandHandler(deps: SlashHandlerDeps) {
       }
       let nextThreadId = targetArg;
       if (/^\d+$/.test(targetArg)) {
-        const cached = recentThreadsCache.get(binding.scopeHash);
+        let cached = recentThreadsCache.get(binding.scopeHash);
         const idx = Number.parseInt(targetArg, 10) - 1;
-        if (!cached || !cached[idx]) {
+        if (!cached) {
+          const project = await findProject(binding.workspace);
+          const list = await deps.observer.call<{ threads?: ThreadListRow[]; items?: ThreadListRow[] }>(
+            't3_thread_list',
+            { projectId: project.id, limit: 10 },
+          );
+          cached = (list.threads ?? list.items ?? []).slice(0, 10);
+          recentThreadsCache.set(binding.scopeHash, cached);
+        }
+        if (!cached[idx]) {
           await deps.sendReply('未找到该编号，请先发送 /threads 刷新列表后再执行 /use <编号>。');
           return 'handled';
         }

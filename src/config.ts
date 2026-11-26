@@ -2,7 +2,15 @@ import { realpathSync } from 'node:fs';
 import { access, readFile } from 'node:fs/promises';
 import path, { dirname, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { digest } from './protocol.ts';
+import {
+  DEFAULT_DOWNLOAD_IDLE_TIMEOUT_MS,
+  DEFAULT_DOWNLOAD_TOTAL_TIMEOUT_MS,
+  DEFAULT_MAX_ATTACHMENTS_PER_MESSAGE,
+  DEFAULT_MAX_INBOUND_ATTACHMENT_BYTES,
+  DEFAULT_UPLOAD_TIMEOUT_MS,
+  digest,
+  isValidAttachmentHostPattern,
+} from './protocol.ts';
 import type {
   Credentials,
   RawPluginConfig,
@@ -23,6 +31,11 @@ export const LEGACY_DEFAULT_ATTACHMENT_HOSTS = [
 export const DEFAULT_ATTACHMENT_HOSTS = [
   ...LEGACY_DEFAULT_ATTACHMENT_HOSTS,
   'qqbot.ugcimg.cn',
+  '*.nt.qq.com.cn',
+  '*.nt.qq.com',
+  '*.qpic.cn',
+  '*.ugcimg.cn',
+  '*.gtimg.cn',
 ];
 
 export const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
@@ -143,6 +156,13 @@ export function parseConfig(raw: RawPluginConfig, configPath: string): ResolvedP
     Array.isArray(raw.attachmentHosts) && raw.attachmentHosts.length > 0
       ? [...new Set(raw.attachmentHosts.map(h => String(h).trim().toLowerCase()).filter(Boolean))]
       : [];
+  for (const hostPattern of configuredHosts) {
+    if (!isValidAttachmentHostPattern(hostPattern)) {
+      throw new Error(
+        `Invalid attachmentHosts entry "${hostPattern}". Use an exact HTTPS hostname or safe subdomain wildcard like "*.nt.qq.com".`,
+      );
+    }
+  }
   const configuredHostSet = new Set(configuredHosts);
   const attachmentHosts =
     configuredHosts.length === 0
@@ -150,6 +170,66 @@ export function parseConfig(raw: RawPluginConfig, configPath: string): ResolvedP
       : LEGACY_DEFAULT_ATTACHMENT_HOSTS.every(host => configuredHostSet.has(host))
         ? [...new Set([...configuredHosts, ...DEFAULT_ATTACHMENT_HOSTS])]
         : configuredHosts;
+
+  const parseBoundedInt = (
+    value: number | undefined,
+    fallback: number,
+    min: number,
+    max: number,
+    label: string,
+  ): number => {
+    const resolved = value ?? fallback;
+    if (!Number.isInteger(resolved) || resolved < min || resolved > max) {
+      throw new Error(`Invalid ${label} (${resolved}); expected integer between ${min} and ${max}`);
+    }
+    return resolved;
+  };
+
+  const maxInboundBytes = parseBoundedInt(
+    raw.attachments?.maxInboundBytes,
+    DEFAULT_MAX_INBOUND_ATTACHMENT_BYTES,
+    1024 * 1024,
+    2 * 1024 * 1024 * 1024,
+    'attachments.maxInboundBytes',
+  );
+  const maxOutboundBytes =
+    raw.attachments?.maxOutboundBytes !== undefined
+      ? parseBoundedInt(
+          raw.attachments.maxOutboundBytes,
+          100 * 1024 * 1024,
+          1024 * 1024,
+          500 * 1024 * 1024,
+          'attachments.maxOutboundBytes',
+        )
+      : undefined;
+  const maxPerMessage = parseBoundedInt(
+    raw.attachments?.maxPerMessage,
+    DEFAULT_MAX_ATTACHMENTS_PER_MESSAGE,
+    1,
+    100,
+    'attachments.maxPerMessage',
+  );
+  const downloadIdleTimeoutMs = parseBoundedInt(
+    raw.attachments?.downloadIdleTimeoutMs,
+    DEFAULT_DOWNLOAD_IDLE_TIMEOUT_MS,
+    5_000,
+    300_000,
+    'attachments.downloadIdleTimeoutMs',
+  );
+  const downloadTotalTimeoutMs = parseBoundedInt(
+    raw.attachments?.downloadTotalTimeoutMs,
+    DEFAULT_DOWNLOAD_TOTAL_TIMEOUT_MS,
+    10_000,
+    1_800_000,
+    'attachments.downloadTotalTimeoutMs',
+  );
+  const uploadTimeoutMs = parseBoundedInt(
+    raw.attachments?.uploadTimeoutMs,
+    DEFAULT_UPLOAD_TIMEOUT_MS,
+    5_000,
+    600_000,
+    'attachments.uploadTimeoutMs',
+  );
 
   return {
     configPath: absConfigPath,
@@ -179,6 +259,14 @@ export function parseConfig(raw: RawPluginConfig, configPath: string): ResolvedP
       stripPrefix: raw.gateway?.stripPrefix ?? '',
     },
     attachmentHosts,
+    attachments: {
+      maxInboundBytes,
+      ...(maxOutboundBytes !== undefined ? { maxOutboundBytes } : {}),
+      maxPerMessage,
+      downloadIdleTimeoutMs,
+      downloadTotalTimeoutMs,
+      uploadTimeoutMs,
+    },
     bindings,
   };
 }

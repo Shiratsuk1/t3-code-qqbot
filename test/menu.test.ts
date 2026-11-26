@@ -30,6 +30,9 @@ test('applyConfigSet updates typed fields, syncs default bridgeUrl, and rejects 
   const updatedMute = applyConfigSet(updatedSettle, 't3.muteMobileCompletionThreadId', 'mcp:thread-123');
   assert.equal(updatedMute.t3.muteMobileCompletionThreadId, 'mcp:thread-123');
 
+  const updatedAtt = applyConfigSet(updatedMute, 'attachments.maxInboundBytes', String(300 * 1024 * 1024));
+  assert.equal(updatedAtt.attachments?.maxInboundBytes, 300 * 1024 * 1024);
+
   assert.throws(() => applyConfigSet(base, 'bridge.port', 'not-a-port'), /Invalid integer/);
   assert.throws(() => applyConfigSet(base, 'gateway.requireMentionInGroup', 'maybe'), /Invalid boolean/);
   assert.throws(() => applyConfigSet(base, 'unknown.key', '1'), /Unknown config key/);

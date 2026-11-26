@@ -62,6 +62,11 @@ Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:18773/ready'
   ```bash
   t3-qqbot doctor --config ./config.json
   ```
+- **面向本机真实 T3 Code 的无 Mock 契约实证（开发者/升级验收推荐）**：
+  ```bash
+  npm run verify:live
+  ```
+  验证内容覆盖 T3 MCP 能力发现、原生 WS 只读查询、10 MiB 图片 / 11 MiB 大图转文件 / 15 MiB & 50 MiB 视频流式上传边界、`50 MiB + 1 B` 拒收边界、流式入站落盘零 `.part` 残留及出站 `safeArtifact` 矩阵（全部上传后立即 `discard`，不污染现有线程）。
 - **补发未送达的回复**（桥接在线时即可执行，不占端口、不重跑模型）：
   1. 从 `state/bridge.log` 的 `T3 accepted <key> <threadId> <runId>` 或最新 `state/*.run.json` 提取 `runId`；
   2. 执行：

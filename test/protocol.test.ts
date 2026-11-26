@@ -1,76 +1,144 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { detectExtension, digest, mimeFromExtension, safeArtifact, saveAttachment } from '../src/protocol.ts';
+import {
+  AttachmentError,
+  detectExtension,
+  digest,
+  formatByteSize,
+  isHostAllowed,
+  isT3NativeImageMime,
+  isValidAttachmentHostPattern,
+  mimeFromExtension,
+  safeArtifact,
+  saveAttachment,
+} from '../src/protocol.ts';
 
-test('detectExtension sniffs png, jpg, wav, silk, amr, mp3, ogg, and falls back cleanly', () => {
+test('detectExtension sniffs image, audio, video, document, archive magic bytes and content-type hints', () => {
   assert.equal(detectExtension(Buffer.from('89504e470d0a1a0a0000', 'hex'), 'unknown'), 'png');
   assert.equal(detectExtension(Buffer.from('ffd8ffe000104a46', 'hex'), 'unknown'), 'jpg');
+  assert.equal(detectExtension(Buffer.from('GIF89a\x01\x00'), 'unknown'), 'gif');
+  assert.equal(detectExtension(Buffer.from('RIFF1234WEBP'), 'unknown'), 'webp');
   assert.equal(detectExtension(Buffer.from('RIFF1234WAVEfmt '), 'voice'), 'wav');
+  assert.equal(detectExtension(Buffer.from('RIFF1234AVI LIST'), 'clip'), 'avi');
   assert.equal(detectExtension(Buffer.from('\x02#!SILK_V3abc'), 'voice'), 'silk');
   assert.equal(detectExtension(Buffer.from('#!AMR\nabc'), 'voice'), 'amr');
+  assert.equal(detectExtension(Buffer.from('#!AMR-WB\nabc'), 'voice'), 'amr');
   assert.equal(detectExtension(Buffer.from('ID3\x03\x00\x00'), 'voice'), 'mp3');
   assert.equal(detectExtension(Buffer.from('OggS\x00\x02'), 'voice'), 'ogg');
+  assert.equal(detectExtension(Buffer.from('fLaC\x00\x00'), 'voice'), 'flac');
+  assert.equal(detectExtension(Buffer.from('000000186674797069736f6d', 'hex'), 'video'), 'mp4');
+  assert.equal(detectExtension(Buffer.from('000000146674797071742020', 'hex'), 'video'), 'mov');
+  assert.equal(detectExtension(Buffer.from('00000018667479704d344120', 'hex'), 'audio'), 'm4a');
+  assert.equal(detectExtension(Buffer.from('1a45dfa301000000', 'hex'), 'movie'), 'mkv');
+  assert.equal(detectExtension(Buffer.from('1a45dfa301000000', 'hex'), 'movie.webm'), 'webm');
+  assert.equal(detectExtension(Buffer.from('%PDF-1.7\n'), 'unknown'), 'pdf');
+  assert.equal(detectExtension(Buffer.from('504b030414000000', 'hex'), 'slides.pptx'), 'pptx');
+  assert.equal(detectExtension(Buffer.from('504b030414000000', 'hex'), 'archive'), 'zip');
   assert.equal(detectExtension(Buffer.from('hello world'), 'report.pdf'), 'pdf');
+  assert.equal(detectExtension(Buffer.from('hello world'), 'noext', 'video/mp4; codecs=avc1'), 'mp4');
   assert.equal(detectExtension(Buffer.from('hello world'), 'weird.ext!@#'), 'bin');
 });
 
-test('digest supports Buffer directly and matches string hash', () => {
+test('digest, formatByteSize, isT3NativeImageMime, and mimeFromExtension cover full media matrix', () => {
   assert.equal(digest(Buffer.from('hello', 'utf8')), digest('hello'));
-});
-
-test('mimeFromExtension maps common media and document extensions', () => {
+  assert.equal(formatByteSize(512), '512 B');
+  assert.equal(formatByteSize(15 * 1024 * 1024), '15 MiB');
+  assert.equal(formatByteSize(15.5 * 1024 * 1024), '15.5 MiB');
+  assert.equal(isT3NativeImageMime('image/png'), true);
+  assert.equal(isT3NativeImageMime('image/bmp'), false);
   assert.equal(mimeFromExtension('photo.PNG'), 'image/png');
+  assert.equal(mimeFromExtension('clip.mp4'), 'video/mp4');
+  assert.equal(mimeFromExtension('clip.mov'), 'video/quicktime');
   assert.equal(mimeFromExtension('voice.wav'), 'audio/wav');
+  assert.equal(mimeFromExtension('doc.docx'), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
   assert.equal(mimeFromExtension('doc.pdf'), 'application/pdf');
   assert.equal(mimeFromExtension('archive.unknown'), 'application/octet-stream');
 });
 
-test('safeArtifact allows files inside workspace and blocks traversal and UNC paths', async () => {
+test('attachment host pattern validation and wildcard matching block overly broad or loopback patterns', () => {
+  assert.equal(isValidAttachmentHostPattern('multimedia.nt.qq.com'), true);
+  assert.equal(isValidAttachmentHostPattern('*.nt.qq.com'), true);
+  assert.equal(isValidAttachmentHostPattern('*.nt.qq.com.cn'), true);
+  assert.equal(isValidAttachmentHostPattern('*.qpic.cn'), true);
+  assert.equal(isValidAttachmentHostPattern('*'), false);
+  assert.equal(isValidAttachmentHostPattern('*.com'), false);
+  assert.equal(isValidAttachmentHostPattern('*.cn'), false);
+  assert.equal(isValidAttachmentHostPattern('*.com.cn'), false);
+  assert.equal(isValidAttachmentHostPattern('localhost'), false);
+  assert.equal(isValidAttachmentHostPattern('127.0.0.1'), false);
+
+  const allow = ['multimedia.nt.qq.com', '*.qpic.cn', '*.nt.qq.com.cn'];
+  assert.equal(isHostAllowed('multimedia.nt.qq.com', allow), true);
+  assert.equal(isHostAllowed('video.nt.qq.com.cn', allow), true);
+  assert.equal(isHostAllowed('a.b.qpic.cn', allow), true);
+  assert.equal(isHostAllowed('qpic.cn', allow), false);
+  assert.equal(isHostAllowed('evil-qpic.cn', allow), false);
+  assert.equal(isHostAllowed('127.0.0.1', allow), false);
+});
+
+test('safeArtifact maps image/video/voice/file types, enforces per-type limits, and blocks traversal and UNC', async () => {
   const dir = await mkdtemp(join(tmpdir(), 't3-qqbot-art-'));
   const inside = join(dir, 'workspace');
   const outside = join(dir, 'outside.txt');
   await mkdir(inside, { recursive: true });
   await writeFile(join(inside, 'chart.png'), Buffer.from([1, 2, 3, 4]));
+  await writeFile(join(inside, 'clip.mp4'), Buffer.from([0, 0, 0, 0x18]));
+  await writeFile(join(inside, 'voice.silk'), Buffer.from('#!SILK_V3x'));
+  await writeFile(join(inside, 'report.pdf'), Buffer.from('%PDF-1.7'));
   await writeFile(join(inside, 'empty.png'), Buffer.alloc(0));
+  const over20mVoice = join(inside, 'huge.silk');
+  const fh = await open(over20mVoice, 'w');
+  await fh.truncate(21 * 1024 * 1024);
+  await fh.close();
   await writeFile(outside, 'secret');
   try {
-    const ok = await safeArtifact(inside, 'chart.png');
-    assert.equal(ok.fileType, 1);
-    assert.equal(ok.fileName, 'chart.png');
+    assert.equal((await safeArtifact(inside, 'chart.png')).fileType, 1);
+    assert.equal((await safeArtifact(inside, 'clip.mp4')).fileType, 2);
+    assert.equal((await safeArtifact(inside, 'voice.silk')).fileType, 3);
+    assert.equal((await safeArtifact(inside, 'report.pdf')).fileType, 4);
 
     await assert.rejects(() => safeArtifact(inside, '../outside.txt'), /outside this workspace/);
     await assert.rejects(() => safeArtifact(inside, '../nonexistent-probe.txt'), /outside this workspace/);
     await assert.rejects(() => safeArtifact(inside, '\\\\evil.example.com\\share\\leak.png'), /outside this workspace/);
     await assert.rejects(() => safeArtifact(inside, '//evil.example.com/share/leak.png'), /outside this workspace/);
     await assert.rejects(() => safeArtifact(inside, 'empty.png'), /Invalid artifact size/);
+    await assert.rejects(
+      () => safeArtifact(inside, 'huge.silk'),
+      err => err instanceof AttachmentError && err.code === 'OUTBOUND_SIZE_EXCEEDED',
+    );
+    await assert.rejects(
+      () => safeArtifact(inside, 'report.pdf', { maxBytes: 4 }),
+      err => err instanceof AttachmentError && err.code === 'OUTBOUND_SIZE_EXCEEDED',
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test('saveAttachment rejects non-https and non-allowlisted hosts, and validates redirects within allowlist', async () => {
-  const hosts = new Set(['multimedia.nt.qq.com', 'qqbot.ugcimg.cn']);
+test('saveAttachment validates allowlist, streams >12 MiB files, fast-rejects Content-Length, and cleans up .part files', async () => {
+  const hosts = new Set(['multimedia.nt.qq.com', 'qqbot.ugcimg.cn', '*.nt.qq.com']);
   await assert.rejects(
     () => saveAttachment({ url: 'http://multimedia.nt.qq.com/a.png' }, tmpdir(), 0, hosts),
-    /Unrecognized QQ attachment origin/,
+    err => err instanceof AttachmentError && err.code === 'HOST_NOT_ALLOWED' && /Unrecognized QQ attachment origin/.test(err.message),
   );
   await assert.rejects(
     () => saveAttachment({ url: 'https://evil.example.com/a.png' }, tmpdir(), 0, hosts),
-    /Unrecognized QQ attachment origin/,
+    err => err instanceof AttachmentError && err.code === 'HOST_NOT_ALLOWED',
   );
 
-  const dir = await mkdtemp(join(tmpdir(), 't3-qqbot-voice-'));
+  const dir = await mkdtemp(join(tmpdir(), 't3-qqbot-dl-'));
   try {
+    // 1. Redirect within allowlist + magic sniff
     const wavBytes = Buffer.from('RIFF1234WAVEfmt 0000');
     const allowlistedRedirectFetch: typeof fetch = async input => {
       const target = String(input);
       if (target === 'https://qqbot.ugcimg.cn/voice/initial') {
         return new Response(null, {
           status: 302,
-          headers: { location: 'https://multimedia.nt.qq.com/voice/final' },
+          headers: { location: 'https://video.nt.qq.com/voice/final' },
         });
       }
       return new Response(wavBytes, { status: 200 });
@@ -83,12 +151,75 @@ test('saveAttachment rejects non-https and non-allowlisted hosts, and validates 
       allowlistedRedirectFetch,
     );
     assert.equal(saved.format, 'wav');
+    assert.equal(saved.sizeBytes, wavBytes.length);
 
+    // 2. Evil redirect rejected
     const evilRedirectFetch: typeof fetch = async () =>
       new Response(null, { status: 302, headers: { location: 'https://evil.example.com/steal.wav' } });
     await assert.rejects(
       () => saveAttachment({ url: 'https://qqbot.ugcimg.cn/voice/bad' }, dir, 1, hosts, evilRedirectFetch),
-      /Unrecognized QQ attachment origin/,
+      err => err instanceof AttachmentError && err.code === 'HOST_NOT_ALLOWED',
+    );
+
+    // 3. Fast Content-Length oversize rejection
+    const declaredHugeFetch: typeof fetch = async () =>
+      new Response('tiny', { status: 200, headers: { 'content-length': String(500 * 1024 * 1024) } });
+    await assert.rejects(
+      () =>
+        saveAttachment({ url: 'https://video.nt.qq.com/huge.mp4', filename: 'huge.mp4' }, dir, 2, hosts, {
+          fetchImpl: declaredHugeFetch,
+          maxBytes: 10 * 1024 * 1024,
+        }),
+      err => err instanceof AttachmentError && err.code === 'SIZE_EXCEEDED' && err.details.sizeBytes === 500 * 1024 * 1024,
+    );
+
+    // 4. Mid-stream oversize rejection cleans up temp .part file
+    const midStreamOversizeFetch: typeof fetch = async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(Buffer.alloc(4096, 1));
+            controller.enqueue(Buffer.alloc(4096, 2));
+            controller.close();
+          },
+        }),
+        { status: 200 },
+      );
+    await assert.rejects(
+      () =>
+        saveAttachment({ url: 'https://video.nt.qq.com/over.mp4', filename: 'over.mp4' }, dir, 3, hosts, {
+          fetchImpl: midStreamOversizeFetch,
+          maxBytes: 5000,
+        }),
+      err => err instanceof AttachmentError && err.code === 'SIZE_EXCEEDED',
+    );
+
+    // 5. Idle timeout during stalled body cleans up temp .part file
+    const stalledFetch: typeof fetch = async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(Buffer.from('000000186674797069736f6d', 'hex'));
+            // Never close or enqueue another chunk
+          },
+        }),
+        { status: 200 },
+      );
+    await assert.rejects(
+      () =>
+        saveAttachment({ url: 'https://video.nt.qq.com/stall.mp4', filename: 'stall.mp4' }, dir, 4, hosts, {
+          fetchImpl: stalledFetch,
+          idleTimeoutMs: 60,
+          totalTimeoutMs: 500,
+        }),
+      err => err instanceof AttachmentError && err.code === 'DOWNLOAD_TIMEOUT',
+    );
+
+    const remaining = await readdir(dir);
+    assert.equal(
+      remaining.some(f => f.endsWith('.part')),
+      false,
+      `Expected zero leftover .part files, found: ${remaining.join(', ')}`,
     );
   } finally {
     await rm(dir, { recursive: true, force: true });

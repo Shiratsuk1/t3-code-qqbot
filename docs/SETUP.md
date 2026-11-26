@@ -244,7 +244,7 @@ QQ 开放平台后台不会直接显示你个人账号对应的 `user_openid`。
 
 配置完成后重启对应 T3 会话或 Provider；之后你在 QQ 里让 AI「画张图发给我」或「把生成的报告发到 QQ」，AI 调用 `qqbot_send_media({ path: "output.png" })` 即可直接把工作区内的文件发回当前 QQ 对话。
 
-> **安全边界**：`qqbot_send_media` 严格限制只能发送当前绑定工作区目录内的文件（最大 12 MiB），拒绝 `../` 越界及 Windows UNC 路径；且该 MCP 进程仅需 `appId`/`appSecret`，不需要 `bridgeSecret`。
+> **安全边界**：`qqbot_send_media` 严格限制只能发送当前绑定工作区目录内的文件（按 QQ 官方分片上传上限校验：图片 30 MiB、语音 20 MiB、`.mp4` 视频与普通文件 100 MiB，可在 `config.json` 的 `attachments.maxOutboundBytes` 覆盖），拒绝 `../` 越界及 Windows UNC 路径；且该 MCP 进程仅需 `appId`/`appSecret`，不需要 `bridgeSecret`。
 
 ---
 

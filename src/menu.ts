@@ -123,9 +123,35 @@ export function applyConfigSet(raw: RawPluginConfig, key: string, value: string)
     case 'gateway.stripPrefix':
       next.gateway.stripPrefix = value.trim();
       break;
+    case 'attachments.maxInboundBytes':
+      next.attachments ??= {};
+      next.attachments.maxInboundBytes = parseIntStrict(value, 'attachments.maxInboundBytes');
+      break;
+    case 'attachments.maxOutboundBytes':
+      next.attachments ??= {};
+      next.attachments.maxOutboundBytes = value.trim()
+        ? parseIntStrict(value, 'attachments.maxOutboundBytes')
+        : undefined;
+      break;
+    case 'attachments.maxPerMessage':
+      next.attachments ??= {};
+      next.attachments.maxPerMessage = parseIntStrict(value, 'attachments.maxPerMessage');
+      break;
+    case 'attachments.downloadIdleTimeoutMs':
+      next.attachments ??= {};
+      next.attachments.downloadIdleTimeoutMs = parseIntStrict(value, 'attachments.downloadIdleTimeoutMs');
+      break;
+    case 'attachments.downloadTotalTimeoutMs':
+      next.attachments ??= {};
+      next.attachments.downloadTotalTimeoutMs = parseIntStrict(value, 'attachments.downloadTotalTimeoutMs');
+      break;
+    case 'attachments.uploadTimeoutMs':
+      next.attachments ??= {};
+      next.attachments.uploadTimeoutMs = parseIntStrict(value, 'attachments.uploadTimeoutMs');
+      break;
     default:
       throw new Error(
-        `Unknown config key "${key}". Supported keys: stateDir, credentialsFile, t3.origin, t3.executable, t3.home, t3.muteMobileCompletionThreadId, bridge.host, bridge.port, bridge.maxMessageChars, bridge.proactiveBackgroundReports, bridge.autoSettleThread, bridge.enableSlashCommands, gateway.bridgeUrl, gateway.requireMentionInGroup, gateway.stripPrefix`,
+        `Unknown config key "${key}". Supported keys: stateDir, credentialsFile, t3.origin, t3.executable, t3.home, t3.muteMobileCompletionThreadId, bridge.host, bridge.port, bridge.maxMessageChars, bridge.proactiveBackgroundReports, bridge.autoSettleThread, bridge.enableSlashCommands, gateway.bridgeUrl, gateway.requireMentionInGroup, gateway.stripPrefix, attachments.maxInboundBytes, attachments.maxOutboundBytes, attachments.maxPerMessage, attachments.downloadIdleTimeoutMs, attachments.downloadTotalTimeoutMs, attachments.uploadTimeoutMs`,
       );
   }
   return next;
@@ -662,7 +688,7 @@ export async function runConfigMenu(options: {
           hosts.forEach((h, i) => console.log(`  ${i + 1}. ${h}`));
           const action = await ask('操作: [a]添加域名 / [d]删除编号 / [r]恢复默认 / 回车返回');
           if (action.toLowerCase() === 'a') {
-            const domain = await ask('输入要添加的 HTTPS 域名 (如 multimedia.nt.qq.com)');
+            const domain = await ask('输入要添加的 HTTPS 域名或安全子域通配符 (如 multimedia.nt.qq.com 或 *.qpic.cn)');
             if (domain) {
               hosts.push(domain.toLowerCase());
               raw.attachmentHosts = [...new Set(hosts)];

@@ -14,8 +14,14 @@ export type Attachment = {
   fallback_url?: string;
   content_type?: string;
   filename?: string;
+  size?: number;
   asr_refer_text?: string;
   stagedName?: string;
+};
+
+export type InboundQuote = {
+  text?: string;
+  attachmentSummary?: string;
 };
 
 export type InboundEvent = {
@@ -24,6 +30,7 @@ export type InboundEvent = {
   group_openid?: string;
   author?: { user_openid?: string };
   attachments?: Attachment[];
+  quote?: InboundQuote;
 };
 
 export type NativeAttachment = {
@@ -79,6 +86,21 @@ export type GatewayConfig = {
   stripPrefix?: string;
 };
 
+export type AttachmentsConfig = {
+  /** Max inbound attachment size downloaded from QQ (bytes). Default: 200 MiB. */
+  maxInboundBytes?: number;
+  /** Optional override for max outbound media size sent via qqbot_send_media (bytes). Default: QQ SDK per-type limits (up to 100 MiB). */
+  maxOutboundBytes?: number;
+  /** Max attachments per inbound QQ message (1-100). Default: 10. */
+  maxPerMessage?: number;
+  /** Per-chunk idle timeout while downloading from QQ CDN (ms). Default: 30000. */
+  downloadIdleTimeoutMs?: number;
+  /** Total download timeout per attachment (ms). Default: 300000. */
+  downloadTotalTimeoutMs?: number;
+  /** Upload timeout when streaming attachment bytes to local T3 Code (ms). Default: 120000. */
+  uploadTimeoutMs?: number;
+};
+
 export type RawPluginConfig = {
   stateDir: string;
   credentialsFile?: string;
@@ -86,6 +108,7 @@ export type RawPluginConfig = {
   bridge: BridgeConfig;
   gateway?: GatewayConfig;
   attachmentHosts?: string[];
+  attachments?: AttachmentsConfig;
   bindings: BindingConfig[];
 };
 
@@ -125,6 +148,14 @@ export type ResolvedPluginConfig = {
     stripPrefix: string;
   };
   attachmentHosts: string[];
+  attachments: {
+    maxInboundBytes: number;
+    maxOutboundBytes?: number;
+    maxPerMessage: number;
+    downloadIdleTimeoutMs: number;
+    downloadTotalTimeoutMs: number;
+    uploadTimeoutMs: number;
+  };
   bindings: ResolvedBinding[];
 };
 

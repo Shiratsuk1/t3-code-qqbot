@@ -3,8 +3,14 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { buildInboundMessageText, createBridgeRuntime, startTypingKeepalive } from '../src/bridge.ts';
+import {
+  buildInboundMessageText,
+  createBridgeRuntime,
+  formatUserFacingBridgeError,
+  startTypingKeepalive,
+} from '../src/bridge.ts';
 import { parseConfig } from '../src/config.ts';
+import { AttachmentError } from '../src/protocol.ts';
 
 test('bridge HTTP server enforces auth, validates events, and accepts bound scopes', async () => {
   const dir = await mkdtemp(join(tmpdir(), 't3-qqbot-bridge-'));
@@ -139,4 +145,43 @@ test('buildInboundMessageText preserves QQ voice ASR transcripts and falls back 
     buildInboundMessageText('', [{ url: 'https://multimedia.nt.qq.com.cn/a.png' }], [{ mimeType: 'image/png' }]),
     '',
   );
+  const withFallback = buildInboundMessageText(
+    '请剪辑前 10 秒',
+    [{ url: 'https://video.nt.qq.com/big.mp4' }],
+    [],
+    [
+      {
+        path: 'C:\\ws\\attachments\\k\\0-abc.mp4',
+        fileName: 'speech.mp4',
+        mimeType: 'video/mp4',
+        sizeBytes: 75 * 1024 * 1024,
+        reason: 'exceeds 50 MiB',
+      },
+    ],
+    { text: '旧消息文本', attachmentSummary: '[视频: old.mp4]' },
+  );
+  assert.match(withFallback, /\[引用消息\] 旧消息文本 \[视频: old\.mp4\]/);
+  assert.match(withFallback, /请剪辑前 10 秒/);
+  assert.match(withFallback, /speech\.mp4 \(75 MiB, video\/mp4\): C:\\ws\\attachments\\k\\0-abc\.mp4/);
+});
+
+test('formatUserFacingBridgeError surfaces actionable Chinese reasons for every attachment & T3 failure mode', () => {
+  const sizeErr = new AttachmentError('SIZE_EXCEEDED', 'too big', {
+    fileName: 'speech.mp4',
+    sizeBytes: 250 * 1024 * 1024,
+    maxBytes: 200 * 1024 * 1024,
+  });
+  assert.match(formatUserFacingBridgeError(sizeErr), /speech\.mp4.*250 MiB.*200 MiB/);
+
+  const hostErr = new AttachmentError('HOST_NOT_ALLOWED', 'bad host', { host: 'cdn.example.net' });
+  assert.match(formatUserFacingBridgeError(hostErr), /cdn\.example\.net.*attachmentHosts/);
+
+  const timeoutErr = new AttachmentError('DOWNLOAD_TIMEOUT', 'stalled', { fileName: 'clip.mp4', timeoutMs: 30_000 });
+  assert.match(formatUserFacingBridgeError(timeoutErr), /clip\.mp4.*30 秒/);
+
+  const httpErr = new AttachmentError('DOWNLOAD_HTTP', '403', { status: 403 });
+  assert.match(formatUserFacingBridgeError(httpErr), /HTTP 403/);
+
+  const connErr = new Error('fetch failed: connect ECONNREFUSED 127.0.0.1:3773');
+  assert.match(formatUserFacingBridgeError(connErr), /无法连接本地 T3 Code/);
 });

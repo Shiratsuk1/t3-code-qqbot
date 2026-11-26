@@ -14,8 +14,8 @@
    - T3 会话令牌按需短期签发，并在任务结束或进程退出时自动吊销；
    - 出站媒体 MCP（`dist/publish.mjs`）隔离运行，仅需 `appId` / `appSecret`，无法接触 `bridgeSecret`。
 3. **附件与文件系统边界**：
-   - 入站附件强制 HTTPS + 域名白名单 + 魔数文件头嗅探 + 单件 12 MiB / 单消息 10 件上限；
-   - 出站 `qqbot_send_media` 拒绝 Windows UNC 路径与 `../` 越界，并经 `fs.realpath` 校验目标文件严格位于对应绑定的工作区目录内。
+   - 入站附件强制 HTTPS + 精确域名/安全子域通配符白名单（拒绝泛匹配顶级域、IP 与回环地址）+ 魔数文件头嗅探 + 流式落盘（默认单件 200 MiB / 单消息 10 件，可在 `config.json` 调整；下载失败或超限时自动清理临时 `.part` 文件）；
+   - 出站 `qqbot_send_media` 拒绝 Windows UNC 路径与 `../` 越界，并经 `fs.realpath` 校验目标文件严格位于对应绑定的工作区目录内，且按文件类型受 QQ 官方分片上传上限约束（图 30 MiB / 语音 20 MiB / 视频与文件 100 MiB，可通过 `attachments.maxOutboundBytes` 进一步收紧）。
 4. **隐私零提交**：
    - `.gitignore` 默认忽略 `config.json`、`credentials.json`、`state/` 与本地日志文件；发布包与源码仓库不包含任何私有账号或主机配置。
 

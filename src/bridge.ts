@@ -3,7 +3,7 @@ import { appendFileSync } from 'node:fs';
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
-import { basename, extname, join, resolve } from 'node:path';
+import { extname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { QQBot, StreamInputState, StreamSession } from '@tencent-connect/qqbot-nodejs';
 import { ApiClient, MessageApi } from '@tencent-connect/qqbot-nodejs/protocol';
@@ -18,13 +18,19 @@ import {
 import { Observer } from './observe.ts';
 import type { ProjectListItem } from './observe.ts';
 import {
+  AttachmentError,
   copyStagedAttachment,
   digest,
   digestBuffer,
-  MAX_ATTACHMENTS_PER_MESSAGE,
+  formatByteSize,
+  isT3NativeImageMime,
   mimeFromExtension,
   saveAttachment,
+  T3_MAX_FILE_BYTES,
+  T3_MAX_IMAGE_BYTES,
+  T3_MAX_TOTAL_IMAGE_BYTES,
 } from './protocol.ts';
+import type { SavedAttachment } from './protocol.ts';
 import { migrateLegacyWindowsServiceTask } from './service.ts';
 import {
   createSlashCommandHandler,
@@ -32,6 +38,7 @@ import {
   readActiveThreadOverride,
   writeActiveThreadOverride,
 } from './slash-commands.ts';
+import type { ThreadListRow } from './slash-commands.ts';
 import { T3Cli } from './t3-cli.ts';
 import {
   createNativeThread,
@@ -49,6 +56,7 @@ import type {
   Attachment,
   Credentials,
   InboundEvent,
+  InboundQuote,
   NativeAttachment,
   PersistedRunRecord,
   ReplyAddress,
@@ -57,29 +65,117 @@ import type {
   Target,
 } from './types.ts';
 
+export type LocalFallbackAttachment = {
+  path: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  reason: string;
+};
+
 export function buildInboundMessageText(
   content: string | undefined,
   attachments: readonly Attachment[],
   uploadedAttachments: readonly Pick<NativeAttachment, 'mimeType'>[] = [],
+  localFallbackFiles: readonly LocalFallbackAttachment[] = [],
+  quote?: InboundQuote,
 ): string {
+  const parts: string[] = [];
+  if (quote && (quote.text?.trim() || quote.attachmentSummary?.trim())) {
+    const qBody = [quote.text?.trim(), quote.attachmentSummary?.trim()].filter(Boolean).join(' ');
+    if (qBody) parts.push(`[引用消息] ${qBody}`);
+  }
+
   const trimmed = (content ?? '').trim();
+  if (trimmed) parts.push(trimmed);
+
   const transcripts = attachments
     .map(att => att.asr_refer_text?.trim() ?? '')
     .filter(Boolean);
-  const voiceBlock =
-    transcripts.length === 0
-      ? ''
-      : transcripts.length === 1
-        ? `[语音转写参考] ${transcripts[0]}`
-        : transcripts.map((t, idx) => `[语音 ${idx + 1} 转写参考] ${t}`).join('\n');
+  if (transcripts.length === 1) {
+    parts.push(`[语音转写参考] ${transcripts[0]}`);
+  } else if (transcripts.length > 1) {
+    parts.push(transcripts.map((t, idx) => `[语音 ${idx + 1} 转写参考] ${t}`).join('\n'));
+  }
 
-  if (trimmed && voiceBlock) return `${trimmed}\n\n${voiceBlock}`;
-  if (trimmed) return trimmed;
-  if (voiceBlock) return voiceBlock;
+  if (localFallbackFiles.length > 0) {
+    const lines = [
+      '[本地已保存附件（超出 T3 原生单件上传上限，请直接使用本地绝对路径读取/处理）]',
+      ...localFallbackFiles.map(
+        f => `- ${f.fileName} (${formatByteSize(f.sizeBytes)}, ${f.mimeType}): ${f.path}`,
+      ),
+    ];
+    parts.push(lines.join('\n'));
+  }
+
+  if (parts.length > 0) return parts.join('\n\n');
   if (uploadedAttachments.some(att => att.mimeType.toLowerCase().startsWith('audio/'))) {
     return '[语音消息]';
   }
   return '';
+}
+
+export function formatUserFacingBridgeError(
+  error: unknown,
+  config?: Pick<ResolvedPluginConfig, 't3' | 'attachments'>,
+): string {
+  if (error instanceof AttachmentError) {
+    const nameLabel = error.details.fileName ? `「${error.details.fileName}」` : '';
+    switch (error.code) {
+      case 'SIZE_EXCEEDED': {
+        const actual = error.details.sizeBytes ? `大小为 ${formatByteSize(error.details.sizeBytes)}，` : '';
+        const limit = formatByteSize(error.details.maxBytes ?? config?.attachments.maxInboundBytes ?? 0);
+        return `附件${nameLabel}${actual}超过当前入站上限（${limit}）。可在 config.json 的 attachments.maxInboundBytes 中调高该上限。`;
+      }
+      case 'HOST_NOT_ALLOWED': {
+        const host = error.details.host || '未知域名';
+        return `附件来源域名「${host}」不在允许白名单内，请将该域名（或安全子域通配符）添加到 config.json 的 attachmentHosts 后重启。`;
+      }
+      case 'DOWNLOAD_TIMEOUT': {
+        const sec = error.details.timeoutMs ? `${Math.round(error.details.timeoutMs / 1000)} 秒` : '预期时间';
+        return `下载 QQ 附件${nameLabel}超时（超过 ${sec}），请检查网络后重新发送。`;
+      }
+      case 'DOWNLOAD_HTTP':
+        return `下载 QQ 附件${nameLabel}失败（HTTP ${error.details.status ?? 0}），文件链接可能已失效，请重新发送。`;
+      case 'REDIRECT_REJECTED':
+        return `QQ 附件${nameLabel}下载重定向被安全策略拒绝（HTTP ${error.details.status ?? 0}）。`;
+      case 'MISSING_URL':
+      case 'INVALID_URL':
+        return `无法解析 QQ 附件${nameLabel}的下载地址，请重新发送该文件。`;
+      default:
+        break;
+    }
+  }
+
+  const raw = error instanceof Error ? error.message : String(error ?? '');
+  if (/is not registered in T3 Code/i.test(raw)) {
+    return '当前绑定的本地工作区尚未在 T3 Code 中注册，请先在 T3 Code 中打开该项目。';
+  }
+  if (/ECONNREFUSED|ECONNRESET|ETIMEDOUT|fetch failed|T3 closed the delivery connection|T3 CLI \(/i.test(raw)) {
+    const origin = config?.t3.origin ?? '本地 T3 Code';
+    return `无法连接本地 T3 Code 服务（${origin}），请确认 T3 Code 正在运行后重试。`;
+  }
+  if (/T3 MCP tool rejected|T3 native attachment upload HTTP/i.test(raw)) {
+    return `T3 Code 拒绝接收本次附件或请求：${raw.slice(0, 180)}`;
+  }
+  return 'T3 Code 暂时无法处理这条消息，请检查本地 T3 服务与日志。';
+}
+
+function isT3AttachmentValidationRejection(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error ?? '');
+  return (
+    /t3_attachment_prepare_upload/i.test(msg) && /Invalid parameters|-32602|rejected/i.test(msg)
+  ) || /T3 native attachment upload HTTP (400|413|415|422)/i.test(msg);
+}
+
+function resolveAttachmentMime(filePath: string, rawContentType?: string): string {
+  const fromExt = mimeFromExtension(filePath);
+  if (fromExt !== 'application/octet-stream') return fromExt;
+  const candidate = rawContentType?.split(';')[0].trim().toLowerCase() ?? '';
+  if (/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(candidate) && candidate !== 'application/octet-stream') {
+    return candidate;
+  }
+  return fromExt;
 }
 
 class ReplyStreamApi extends MessageApi {
@@ -229,6 +325,7 @@ export async function createBridgeRuntime(
 
   const expectedAuthDigest = digestBuffer(`Bearer ${credentials.bridgeSecret}`);
   const threadLocks = new Map<string, Promise<string>>();
+  const recentThreadsCache = new Map<string, ThreadListRow[]>();
   const timing = (stage: string, key: string, runId: string, ...details: (string | number)[]) =>
     console.info('QQ_T3_TIMING', stage, key, runId, Date.now(), ...details);
 
@@ -304,6 +401,7 @@ export async function createBridgeRuntime(
       config,
       observer,
       stateDir: root,
+      recentThreadsCache,
       sendReply: text => sendChunkedReply(reply, text),
       resolveActiveThread: (binding, scope) => resolveThreadForBinding(binding, scope),
       setActiveThreadOverride: async (binding, nextThreadId) => {
@@ -619,9 +717,9 @@ export async function createBridgeRuntime(
     }
 
     const rawAttachments = event.attachments ?? [];
-    if (rawAttachments.length > MAX_ATTACHMENTS_PER_MESSAGE) {
+    if (rawAttachments.length > config.attachments.maxPerMessage) {
       await unlink(receipt).catch(() => {});
-      await qq.sendText(reply, `单条消息最多支持 ${MAX_ATTACHMENTS_PER_MESSAGE} 个附件，请分批发送。`).catch(() => {});
+      await qq.sendText(reply, `单条消息最多支持 ${config.attachments.maxPerMessage} 个附件，请分批发送。`).catch(() => {});
       return;
     }
 
@@ -633,20 +731,31 @@ export async function createBridgeRuntime(
 
     try {
       const uploadedAttachments: NativeAttachment[] = [];
+      const localFallbackFiles: LocalFallbackAttachment[] = [];
       let threadId: string;
       let accepted: { runId: string; sequence: number };
       try {
         const attachmentDir = join(binding.workspace, 'attachments', key);
         const allowedHosts = new Set(config.attachmentHosts);
-        const files: { path: string }[] = [];
+        const downloadOpts = {
+          maxBytes: config.attachments.maxInboundBytes,
+          idleTimeoutMs: config.attachments.downloadIdleTimeoutMs,
+          totalTimeoutMs: config.attachments.downloadTotalTimeoutMs,
+          signal: shutdownController.signal,
+        };
+        const files: { saved: SavedAttachment; source: Attachment }[] = [];
         for (let index = 0; index < rawAttachments.length; index++) {
           const item = rawAttachments[index];
           if (item.stagedName && config.bridge.testStaging) {
-            files.push(await copyStagedAttachment(config.bridge.testStaging, item.stagedName, attachmentDir, index));
+            const saved = await copyStagedAttachment(config.bridge.testStaging, item.stagedName, attachmentDir, index, {
+              maxBytes: config.attachments.maxInboundBytes,
+            });
+            files.push({ saved, source: item });
             continue;
           }
           try {
-            files.push(await saveAttachment(item, attachmentDir, index, allowedHosts));
+            const saved = await saveAttachment(item, attachmentDir, index, allowedHosts, downloadOpts);
+            files.push({ saved, source: item });
           } catch (primaryError) {
             if (item.fallback_url) {
               console.warn(
@@ -655,7 +764,14 @@ export async function createBridgeRuntime(
                 primaryError instanceof Error ? primaryError.message : String(primaryError),
               );
               try {
-                files.push(await saveAttachment({ ...item, url: item.fallback_url }, attachmentDir, index, allowedHosts));
+                const saved = await saveAttachment(
+                  { ...item, url: item.fallback_url },
+                  attachmentDir,
+                  index,
+                  allowedHosts,
+                  downloadOpts,
+                );
+                files.push({ saved, source: item });
                 continue;
               } catch (fallbackError) {
                 if (item.asr_refer_text?.trim()) {
@@ -682,11 +798,121 @@ export async function createBridgeRuntime(
         }
 
         threadId = await resolveThreadForBinding(binding, scope);
-        for (const file of files) {
-          const mime = mimeFromExtension(file.path);
-          uploadedAttachments.push(await observer.upload(file.path, basename(file.path), mime));
+        let nativeImageBytesTotal = 0;
+        for (const { saved, source } of files) {
+          const mime = resolveAttachmentMime(saved.path, source.content_type);
+          if (saved.sizeBytes <= 0) {
+            localFallbackFiles.push({
+              path: saved.path,
+              fileName: saved.fileName,
+              mimeType: mime,
+              sizeBytes: saved.sizeBytes,
+              reason: 'empty file (0 B); T3 native attachments require >= 1 byte',
+            });
+            continue;
+          }
+          const isImage = isT3NativeImageMime(mime);
+          if (isImage) {
+            const fitsImageTotal = nativeImageBytesTotal + saved.sizeBytes <= T3_MAX_TOTAL_IMAGE_BYTES;
+            if (saved.sizeBytes <= T3_MAX_IMAGE_BYTES && fitsImageTotal) {
+              try {
+                uploadedAttachments.push(
+                  await observer.upload(saved.path, saved.fileName, mime, {
+                    forceType: 'image',
+                    timeoutMs: config.attachments.uploadTimeoutMs,
+                  }),
+                );
+                nativeImageBytesTotal += saved.sizeBytes;
+                continue;
+              } catch (uploadError) {
+                if (!isT3AttachmentValidationRejection(uploadError)) throw uploadError;
+                console.warn(
+                  'T3 rejected native image attachment, falling back to workspace path',
+                  key,
+                  saved.fileName,
+                  uploadError instanceof Error ? uploadError.message : String(uploadError),
+                );
+              }
+            } else if (saved.sizeBytes <= T3_MAX_FILE_BYTES && fitsImageTotal) {
+              try {
+                uploadedAttachments.push(
+                  await observer.upload(saved.path, saved.fileName, mime, {
+                    forceType: 'file',
+                    timeoutMs: config.attachments.uploadTimeoutMs,
+                  }),
+                );
+                nativeImageBytesTotal += saved.sizeBytes;
+                continue;
+              } catch (uploadError) {
+                if (!isT3AttachmentValidationRejection(uploadError)) throw uploadError;
+                console.warn(
+                  'T3 rejected large image as file attachment, falling back to workspace path',
+                  key,
+                  saved.fileName,
+                  uploadError instanceof Error ? uploadError.message : String(uploadError),
+                );
+              }
+            }
+            localFallbackFiles.push({
+              path: saved.path,
+              fileName: saved.fileName,
+              mimeType: mime,
+              sizeBytes: saved.sizeBytes,
+              reason: 'exceeds T3 native image attachment limit',
+            });
+            console.info(
+              'Attachment kept on workspace disk (exceeds T3 native image limit)',
+              key,
+              saved.fileName,
+              formatByteSize(saved.sizeBytes),
+              saved.path,
+            );
+            continue;
+          }
+
+          if (saved.sizeBytes <= T3_MAX_FILE_BYTES) {
+            try {
+              uploadedAttachments.push(
+                await observer.upload(saved.path, saved.fileName, mime, {
+                  forceType: 'file',
+                  timeoutMs: config.attachments.uploadTimeoutMs,
+                }),
+              );
+              continue;
+            } catch (uploadError) {
+              if (!isT3AttachmentValidationRejection(uploadError)) throw uploadError;
+              console.warn(
+                'T3 rejected native file attachment, falling back to workspace path',
+                key,
+                saved.fileName,
+                uploadError instanceof Error ? uploadError.message : String(uploadError),
+              );
+            }
+          }
+
+          localFallbackFiles.push({
+            path: saved.path,
+            fileName: saved.fileName,
+            mimeType: mime,
+            sizeBytes: saved.sizeBytes,
+            reason: `exceeds T3 native file limit (${formatByteSize(T3_MAX_FILE_BYTES)})`,
+          });
+          console.info(
+            'Attachment kept on workspace disk (exceeds T3 native file limit)',
+            key,
+            saved.fileName,
+            formatByteSize(saved.sizeBytes),
+            saved.path,
+          );
         }
-        const dispatchText = buildInboundMessageText(event.content, rawAttachments, uploadedAttachments);
+
+        const dispatchText = buildInboundMessageText(
+          event.content,
+          rawAttachments,
+          uploadedAttachments,
+          localFallbackFiles,
+          event.quote,
+        );
         accepted = await t3Cli.withSession(
           { scopes: ['orchestration:read', 'orchestration:operate'], ttl: '2m', label: 'T3 QQBot delivery' },
           token =>
@@ -702,7 +928,7 @@ export async function createBridgeRuntime(
         for (const att of uploadedAttachments) {
           await observer.call('t3_attachment_discard', { attachmentId: att.id }).catch(() => {});
         }
-        await qq.sendText(reply, 'T3 Code 暂时无法处理这条消息，请检查本地 T3 服务与日志。').catch(() => {});
+        await qq.sendText(reply, formatUserFacingBridgeError(error, config)).catch(() => {});
         throw error;
       }
 
@@ -788,7 +1014,8 @@ export async function createBridgeRuntime(
           !d?.id ||
           typeof d.id !== 'string' ||
           (d.content !== undefined && typeof d.content !== 'string') ||
-          (d.attachments !== undefined && !Array.isArray(d.attachments))
+          (d.attachments !== undefined && !Array.isArray(d.attachments)) ||
+          (d.quote !== undefined && (typeof d.quote !== 'object' || d.quote === null || Array.isArray(d.quote)))
         ) {
           res.writeHead(400).end();
           return;

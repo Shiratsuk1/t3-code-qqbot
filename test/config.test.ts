@@ -76,7 +76,62 @@ test('parseConfig resolves relative paths, normalizes hosts, validates bounds, a
     basePath,
   );
   assert.ok(upgradedLegacyHosts.attachmentHosts.includes('qqbot.ugcimg.cn'));
+  assert.ok(upgradedLegacyHosts.attachmentHosts.includes('*.nt.qq.com'));
   assert.ok(upgradedLegacyHosts.attachmentHosts.includes('custom.cdn.example.com'));
+
+  // Attachments config defaults and custom overrides
+  assert.equal(defaultHosts.attachments.maxInboundBytes, 200 * 1024 * 1024);
+  assert.equal(defaultHosts.attachments.maxPerMessage, 10);
+  const customAtt = parseConfig(
+    {
+      stateDir: './state',
+      t3: { origin: 'http://127.0.0.1:3773' },
+      bridge: { port: 18773 },
+      attachments: {
+        maxInboundBytes: 300 * 1024 * 1024,
+        maxOutboundBytes: 80 * 1024 * 1024,
+        maxPerMessage: 20,
+        downloadIdleTimeoutMs: 45_000,
+        downloadTotalTimeoutMs: 600_000,
+        uploadTimeoutMs: 180_000,
+      },
+      bindings: [],
+    },
+    basePath,
+  );
+  assert.equal(customAtt.attachments.maxInboundBytes, 300 * 1024 * 1024);
+  assert.equal(customAtt.attachments.maxOutboundBytes, 80 * 1024 * 1024);
+  assert.equal(customAtt.attachments.maxPerMessage, 20);
+
+  assert.throws(
+    () =>
+      parseConfig(
+        {
+          stateDir: './state',
+          t3: { origin: 'http://127.0.0.1:3773' },
+          bridge: { port: 18773 },
+          attachmentHosts: ['*.com'],
+          bindings: [],
+        },
+        basePath,
+      ),
+    /Invalid attachmentHosts entry/,
+  );
+
+  assert.throws(
+    () =>
+      parseConfig(
+        {
+          stateDir: './state',
+          t3: { origin: 'http://127.0.0.1:3773' },
+          bridge: { port: 18773 },
+          attachments: { maxInboundBytes: 100 },
+          bindings: [],
+        },
+        basePath,
+      ),
+    /Invalid attachments\.maxInboundBytes/,
+  );
 
   assert.throws(
     () =>

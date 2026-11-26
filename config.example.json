@@ -23,8 +23,20 @@
     "multimedia.nt.qq.com",
     "gchat.qpic.cn",
     "c2cpicdw.qpic.cn",
-    "qqbot.ugcimg.cn"
+    "qqbot.ugcimg.cn",
+    "*.nt.qq.com.cn",
+    "*.nt.qq.com",
+    "*.qpic.cn",
+    "*.ugcimg.cn",
+    "*.gtimg.cn"
   ],
+  "attachments": {
+    "maxInboundBytes": 209715200,
+    "maxPerMessage": 10,
+    "downloadIdleTimeoutMs": 30000,
+    "downloadTotalTimeoutMs": 300000,
+    "uploadTimeoutMs": 120000
+  },
   "bindings": [
     {
       "scope": "c2c:REPLACE_WITH_YOUR_USER_OPENID",

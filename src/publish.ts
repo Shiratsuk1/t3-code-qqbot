@@ -123,7 +123,9 @@ export function createMediaPublisher(config: ResolvedPluginConfig) {
     const { route: matchedRoute, workspace: matchedWorkspace } = activeMatches[0];
     // Resolve relative paths from cwd, then strictly jail inside matchedWorkspace
     const targetPath = resolve(cwd, args.path);
-    const file = await safeArtifact(matchedWorkspace, targetPath);
+    const file = await safeArtifact(matchedWorkspace, targetPath, {
+      maxBytes: config.attachments.maxOutboundBytes,
+    });
 
     const credentials = await loadCredentials(config, process.env, { requireBridgeSecret: false });
     const botKey = `${credentials.appId}\0${credentials.appSecret}`;

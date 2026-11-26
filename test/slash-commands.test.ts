@@ -234,6 +234,25 @@ test('createSlashCommandHandler executes /model, /think, /new, /threads, /use, /
     assert.ok(calls.some(c => c.name === 't3_thread_interrupt'));
 
     assert.equal(await handler({ name: 'compact', args: '' }, binding, 'c2c:U1'), 'passthrough');
+
+    // Verify /use <number> works even when a brand-new handler instance runs (cold cache auto-fetch)
+    const coldReplies: string[] = [];
+    const coldHandler = createSlashCommandHandler({
+      config: cfg,
+      observer: mockObserver,
+      stateDir: cfg.stateDir,
+      sendReply: async text => {
+        coldReplies.push(text);
+      },
+      resolveActiveThread: async b => (await readActiveThreadOverride(cfg.stateDir, b.scopeHash)) ?? b.threadId!,
+      setActiveThreadOverride: (b, id) => writeActiveThreadOverride(cfg.stateDir, b.scopeHash, id),
+      rollbackTurns: async () => {
+        throw new Error('unused');
+      },
+    });
+    assert.equal(await coldHandler({ name: 'use', args: '1' }, binding, 'c2c:U1'), 'handled');
+    assert.equal(await readActiveThreadOverride(cfg.stateDir, binding.scopeHash), 'thread-new-1');
+    assert.match(coldReplies.at(-1)!, /已切换至 T3 会话：thread-new-1/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

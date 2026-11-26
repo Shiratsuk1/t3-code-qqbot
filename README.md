@@ -22,8 +22,8 @@ flowchart LR
 - **QQ 聊天内全套斜杠指令面板**：手机端直接发 `/model`（支持 `4n`/`4c`/`4a`/`4h`/`3.8f`/`sonnet`/`opus`/`sol` 等超短简写与跨 Provider 切换）、`/think`、`/provider`、`/new`、`/threads`、`/use`、`/rewind`（`/undo`/`/撤回`）、`/compact`、`/status`、`/tasks`、`/cancel`（`/stop`）、`/update`、`/help`。
 - **原生 T3 协议链路**：直接通过 T3 原生 WebSocket（`message.dispatch` + `orchestration.subscribeThread`）投递与订阅回复，不向聊天正文拼接任何多余标记；私聊收到消息即显示 QQ 左上角**「对方正在输入…」**并每 50 秒自动续期保活，配合 `StreamSession` 实时流式输出，首帧失败自动降级普通消息。
 - **双向富媒体与附件**：
-  - 入站：支持 QQ 图片、语音、普通文件自动下载落盘（HTTPS 域名白名单 + 文件头嗅探 + 单件 12 MiB / 单消息 10 件上限），并通过 T3 原生附件接口上传给模型。
-  - 出站：通过独立 MCP 工具 `qqbot_send_media`（`dist/publish.mjs`）从绑定工作区内安全回传图片/文件至当前 QQ 对话，严格拦截路径穿越与 Windows UNC 外联。
+  - 入站：支持 QQ 图片、语音、视频与普通文件自动流式下载落盘（HTTPS + 官方 CDN 域名/安全子域通配符白名单 + 全媒体魔数嗅探 + 默认单件 200 MiB / 单消息 10 件，可在 `config.json` 的 `attachments` 自定义）；单图 `≤ 10 MiB` 走 T3 原生图片附件，普通文件/视频/大图 `≤ 50 MiB` 走 T3 原生流式上传，超过 T3 单件 50 MiB 上限的大文件自动保留在 `<workspace>/attachments/` 并以本地绝对路径交付给 AI 代理直接处理。
+  - 出站：通过独立 MCP 工具 `qqbot_send_media`（`dist/publish.mjs`）从绑定工作区内安全回传图片/视频(`.mp4`)/语音(`.silk`)/文件至当前 QQ 对话（匹配 QQ 官方 SDK 分片上传上限：图 30 MiB / 语音 20 MiB / 视频与文件 100 MiB），严格拦截路径穿越与 Windows UNC 外联。
 - **幂等与断点恢复**：持久化 `.received`、`.run.json` 与 `.delivered` 状态；提交或下载失败自动释放去重锁，中途断线可在桥接在线时直接通过 `recover <runId>` 补发回复而无需重跑模型。
 - **单机一键启动 & 双机分离皆可**：默认 `t3-qqbot start` 一键同时托管网关与桥接；也支持 Linux 服务器单跑 `gateway` + SSH 隧道转发至 Windows/另一台主机跑 `bridge`。
 
@@ -125,7 +125,7 @@ npm run package
 
 - 桥接 HTTP 仅允许绑定回环地址（`127.0.0.1` / `localhost` / `::1`），使用常量时间比较校验 `Authorization: Bearer <bridgeSecret>`。
 - T3 通信仅允许连接本地回环 `t3.origin`，子进程自动剥离 `QQ_*` 凭据环境变量；所有 T3 会话令牌按需签发并在任务结束或退出时自动吊销。
-- 入站附件强制 HTTPS 域名白名单 + 12 MiB 上限 + 单消息 10 件上限；出站媒体先拦截 UNC/越界路径再通过 `realpath` 严格限制在对应绑定的工作区目录内。
+- 入站附件强制 HTTPS 域名/安全子域通配符白名单 + 流式落盘（默认单件 200 MiB / 单消息 10 件，可配置）；出站媒体先拦截 UNC/越界路径再通过 `realpath` 严格限制在对应绑定的工作区目录内，并按 QQ 官方 SDK 分类型上限校验。
 - 本发布版**不包含**任何私有账号凭据、私有路径或定制 T3 服务端补丁。
 
 ## 许可证
