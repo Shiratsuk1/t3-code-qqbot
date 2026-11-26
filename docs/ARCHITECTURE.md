@@ -6,6 +6,8 @@
 
 ## 1. 总体进程与通信拓扑
 
+![系统架构总览，展示从 QQ 手机端到 T3 Code 的会话链路，以及流式回复和富媒体回传路径](../assets/architecture-overview.svg)
+
 插件由 4 个 `esbuild` 打包的独立 ESM 入口组成，可在单机下由 `cli.mjs start --supervise` 统一拉起，也可将 `gateway.mjs` 与 `bridge.mjs` 拆至两台主机经 SSH 加密隧道互联：
 
 ```mermaid

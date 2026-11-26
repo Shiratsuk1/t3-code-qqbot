@@ -1,19 +1,15 @@
-# T3 Code QQBot Plugin (`t3-code-qqbot`)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Shiratsuk1/t3-code-qqbot/main/assets/banner-dark.svg">
+  <img alt="T3 Code QQBot，在 QQ 里继续你的 T3 Code 会话" src="https://raw.githubusercontent.com/Shiratsuk1/t3-code-qqbot/main/assets/banner-light.svg">
+</picture>
+
+# T3 Code QQBot（`t3-code-qqbot`）
 
 将**官方 QQ 机器人（OpenAPI WebSocket）**接入本地 **T3 Code** 的跨平台桥接插件，原生支持 **Windows** 与 **Linux**。
 
 无需修改或重编译 T3 Code 本体，开箱适配官方桌面端与命令行版 T3 Code。
 
-```mermaid
-flowchart LR
-    QQ[QQ 私聊 / 群聊 @] <-->|官方 WebSocket / OpenAPI| GW[dist/gateway.mjs]
-    GW -->|本机 HTTP 127.0.0.1 / Bearer| BR[dist/bridge.mjs]
-    BR -->|原生附件上传 MCP| T3[官方 T3 Code Server]
-    BR <-->|原生 WebSocket message.dispatch / subscribeThread| T3
-    BR -->|C2C 实时流式 / 群聊分段回包| QQ
-    T3 -->|可选 MCP 工具 qqbot_send_media| PUB[dist/publish.mjs]
-    PUB -->|OpenAPI /files + 媒体消息| QQ
-```
+![系统架构总览，涵盖 QQ 网关、零窗口守护、T3 原生 WebSocket、多模型代理和富媒体 MCP](https://raw.githubusercontent.com/Shiratsuk1/t3-code-qqbot/main/assets/architecture-overview.svg)
 
 ## 核心特性
 
@@ -120,6 +116,10 @@ npm run build
 # 生成 Windows (.zip) 与 Linux (.tar.gz) 干净发布包到 release/
 npm run package
 ```
+
+### 重新导出品牌资产
+
+克隆源码后运行 `node scripts/render-assets.mjs`，可从 `assets/` 中的 SVG 重新生成徽标 PNG、favicon 和社交分享 PNG。脚本使用本机 Chromium、Chrome 或 Edge，浏览器装在其他位置时可用 `CHROMIUM_PATH` 指定。添加 `--preview-dir <目录>` 可同时导出用于审阅的横幅、架构图和各尺寸图标 PNG。
 
 ## 安全设计说明
 
