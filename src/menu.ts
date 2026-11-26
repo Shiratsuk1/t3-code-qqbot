@@ -45,7 +45,6 @@ export function createDefaultRawConfig(): RawPluginConfig {
       requireMentionInGroup: true,
       stripPrefix: '',
     },
-    attachmentHosts: [...DEFAULT_ATTACHMENT_HOSTS],
     bindings: [],
   };
 }
@@ -683,12 +682,16 @@ export async function runConfigMenu(options: {
         } else if (choice === '5') {
           const hosts = Array.isArray(raw.attachmentHosts) && raw.attachmentHosts.length > 0
             ? [...raw.attachmentHosts]
-            : [...DEFAULT_ATTACHMENT_HOSTS];
-          console.log('\n--- 附件下载域名白名单 ---');
-          hosts.forEach((h, i) => console.log(`  ${i + 1}. ${h}`));
-          const action = await ask('操作: [a]添加域名 / [d]删除编号 / [r]恢复默认 / 回车返回');
+            : [];
+          console.log('\n--- 附件下载域名白名单（可选收紧项）---');
+          if (hosts.length === 0) {
+            console.log('  当前模式：不限公网 HTTPS 域名（默认推荐，内置反 SSRF 私网/回环/元数据 IP 拦截）');
+          } else {
+            hosts.forEach((h, i) => console.log(`  ${i + 1}. ${h}`));
+          }
+          const action = await ask('操作: [a]添加限定域名 / [d]删除编号 / [r]恢复默认(不限公网HTTPS) / 回车返回');
           if (action.toLowerCase() === 'a') {
-            const domain = await ask('输入要添加的 HTTPS 域名或安全子域通配符 (如 multimedia.nt.qq.com 或 *.qpic.cn)');
+            const domain = await ask('输入要添加的 HTTPS 域名或安全子域通配符 (如 multimedia.nt.qq.com 或 *.qq.com)');
             if (domain) {
               hosts.push(domain.toLowerCase());
               raw.attachmentHosts = [...new Set(hosts)];
@@ -704,9 +707,9 @@ export async function runConfigMenu(options: {
               console.log('已删除并保存。');
             }
           } else if (action.toLowerCase() === 'r') {
-            raw.attachmentHosts = [...DEFAULT_ATTACHMENT_HOSTS];
+            delete raw.attachmentHosts;
             await saveValidatedConfig(absPath, raw);
-            console.log('已恢复默认白名单。');
+            console.log('已恢复默认模式：放行全部公网 HTTPS 域名（保留反 SSRF 私网拦截）。');
           }
         } else if (choice === '6') {
           console.log('\n--- 后台自守护服务管理 ---');

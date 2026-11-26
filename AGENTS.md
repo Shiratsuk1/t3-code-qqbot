@@ -22,7 +22,7 @@
 ### 1.4 安全边界与隐私零泄漏
 - 桥接 HTTP 服务仅允许监听回环地址（`127.0.0.1` / `localhost` / `::1`），鉴权强制使用 `timingSafeEqual` 校验 `Authorization: Bearer <bridgeSecret>`。
 - T3 通信仅允许连接本地回环 `t3.origin`；派生 `t3` CLI 子进程时强制剥离全部 `QQ_*` 凭据环境变量；临时签发的 T3 会话令牌在任务结束或退出时自动吊销。
-- 入站附件强制 HTTPS + 精确域名/安全子域通配符白名单 + 魔数文件头嗅探 + 流式落盘（默认单件 200 MiB / 单消息 10 件，可在 `config.json` 的 `attachments` 调整；单图 `≤ 10 MiB` 走 T3 原生 `image`、普通文件/视频/大图 `≤ 50 MiB` 走 T3 原生流式 `file`、超过 50 MiB 自动工作区落盘并附本地绝对路径交付）；出站媒体 MCP（`qqbot_send_media`）先拦截 UNC / 越界路径，再经 `realpath` 严格限定在绑定工作区内，并按 QQ 官方 SDK 分类型上限放行（图 30 MiB / 语音 20 MiB / `.mp4` 视频与文件 100 MiB，支持分片上传）。
+- 入站附件强制 HTTPS + 反 SSRF 校验（禁止本机/私网/链路本地/云元数据/CGNAT IP 与非常规端口，兼容 Clash `198.18.0.0/15` Fake-IP；默认不再硬卡静态 CDN 域名白名单，仅当用户主动填写 `attachmentHosts` 时启用限定白名单）+ 魔数文件头嗅探 + 流式落盘（默认单件 200 MiB / 单消息 10 件，可在 `config.json` 的 `attachments` 调整；单图 `≤ 10 MiB` 走 T3 原生 `image`、普通文件/视频/大图 `≤ 50 MiB` 走 T3 原生流式 `file`、超过 50 MiB 自动工作区落盘并附本地绝对路径交付）；出站媒体 MCP（`qqbot_send_media`）先拦截 UNC / 越界路径，再经 `realpath` 严格限定在绑定工作区内，并按 QQ 官方 SDK 分类型上限放行（图 30 MiB / 语音 20 MiB / `.mp4` 视频与文件 100 MiB，支持分片上传）。
 - **隐私零泄漏**：严禁在代码、测试、文档、配置样例或发布包中提交任何个人主机名、用户名、私有 IP、真实 AppID/AppSecret、OpenID 或定制服务端补丁。
 
 ---

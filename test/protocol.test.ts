@@ -8,6 +8,7 @@ import {
   detectExtension,
   digest,
   formatByteSize,
+  isBlockedIpAddress,
   isHostAllowed,
   isT3NativeImageMime,
   isValidAttachmentHostPattern,
@@ -215,11 +216,61 @@ test('saveAttachment validates allowlist, streams >12 MiB files, fast-rejects Co
       err => err instanceof AttachmentError && err.code === 'DOWNLOAD_TIMEOUT',
     );
 
-    const remaining = await readdir(dir);
+  const remaining = await readdir(dir);
     assert.equal(
       remaining.some(f => f.endsWith('.part')),
       false,
       `Expected zero leftover .part files, found: ${remaining.join(', ')}`,
+    );
+
+    // 6. Default open public HTTPS mode (empty allowlist) allows any public Tencent CDN like grouptalk.c2c.qq.com
+    //    while still blocking HTTP, localhost, IP literals, non-default ports, and private-IP DNS SSRF (yet permitting Clash 198.18.x.x Fake-IP)
+    assert.equal(isBlockedIpAddress('127.0.0.1'), true);
+    assert.equal(isBlockedIpAddress('10.0.0.5'), true);
+    assert.equal(isBlockedIpAddress('172.16.0.1'), true);
+    assert.equal(isBlockedIpAddress('192.168.31.1'), true);
+    assert.equal(isBlockedIpAddress('169.254.169.254'), true);
+    assert.equal(isBlockedIpAddress('100.64.0.1'), true);
+    assert.equal(isBlockedIpAddress('::1'), true);
+    assert.equal(isBlockedIpAddress('::ffff:127.0.0.1'), true);
+    assert.equal(isBlockedIpAddress('fc00::1'), true);
+    assert.equal(isBlockedIpAddress('fe80::1'), true);
+    assert.equal(isBlockedIpAddress('198.18.0.5'), false); // Clash/Mihomo TUN Fake-IP
+    assert.equal(isBlockedIpAddress('183.3.226.35'), false); // Public IP
+
+    const docxBytes = Buffer.concat([Buffer.from('504b030414000000', 'hex'), Buffer.from('docx-content')]);
+    const okDocx = await saveAttachment(
+      { url: 'https://grouptalk.c2c.qq.com/download?file=1', filename: '演讲稿.docx' },
+      dir,
+      5,
+      [],
+      {
+        fetchImpl: async () => new Response(docxBytes, { status: 200 }),
+        lookupImpl: async () => [{ address: '183.3.226.35' }],
+      },
+    );
+    assert.equal(okDocx.format, 'docx');
+    assert.equal(okDocx.fileName, '演讲稿.docx');
+
+    await assert.rejects(
+      () =>
+        saveAttachment({ url: 'https://rebind.example.com/secret' }, dir, 6, [], {
+          fetchImpl: async () => new Response('nope', { status: 200 }),
+          lookupImpl: async () => [{ address: '169.254.169.254' }],
+        }),
+      err => err instanceof AttachmentError && err.code === 'HOST_NOT_ALLOWED' && /private\/loopback/.test(err.message),
+    );
+    await assert.rejects(
+      () => saveAttachment({ url: 'https://127.0.0.1/secret' }, dir, 7, []),
+      err => err instanceof AttachmentError && err.code === 'HOST_NOT_ALLOWED',
+    );
+    await assert.rejects(
+      () => saveAttachment({ url: 'https://localhost/secret' }, dir, 8, []),
+      err => err instanceof AttachmentError && err.code === 'HOST_NOT_ALLOWED',
+    );
+    await assert.rejects(
+      () => saveAttachment({ url: 'http://grouptalk.c2c.qq.com/plain' }, dir, 9, []),
+      err => err instanceof AttachmentError && err.code === 'HOST_NOT_ALLOWED',
     );
   } finally {
     await rm(dir, { recursive: true, force: true });

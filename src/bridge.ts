@@ -129,7 +129,10 @@ export function formatUserFacingBridgeError(
       }
       case 'HOST_NOT_ALLOWED': {
         const host = error.details.host || '未知域名';
-        return `附件来源域名「${host}」不在允许白名单内，请将该域名（或安全子域通配符）添加到 config.json 的 attachmentHosts 后重启。`;
+        if (/private\/loopback/i.test(error.message)) {
+          return `附件来源域名「${host}」解析到了本机或私网保留 IP，已被反 SSRF 策略拦截。`;
+        }
+        return `附件来源域名「${host}」被当前自定义白名单或 HTTPS 策略拒绝，请检查 config.json 中的 attachmentHosts（留空即可放行全部公网 HTTPS 域名）。`;
       }
       case 'DOWNLOAD_TIMEOUT': {
         const sec = error.details.timeoutMs ? `${Math.round(error.details.timeoutMs / 1000)} 秒` : '预期时间';

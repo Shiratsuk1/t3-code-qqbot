@@ -15,7 +15,7 @@ import {
   samePath,
   scopeToHash,
 } from '../src/config.ts';
-import { digest } from '../src/protocol.ts';
+import { digest, isHostAllowed } from '../src/protocol.ts';
 
 test('scopeToHash accepts plain c2c/group scopes and sha256 hashes', () => {
   const plain = scopeToHash('c2c:USER_OPENID_123');
@@ -62,23 +62,26 @@ test('parseConfig resolves relative paths, normalizes hosts, validates bounds, a
     { stateDir: './state', t3: { origin: 'http://127.0.0.1:3773' }, bridge: { port: 18773 }, bindings: [] },
     basePath,
   );
+  // Default attachmentHosts is empty (= allow any public HTTPS host with built-in SSRF IP guard)
+  assert.deepEqual(defaultHosts.attachmentHosts, []);
   assert.deepEqual(defaultHosts.attachmentHosts, DEFAULT_ATTACHMENT_HOSTS);
-  assert.ok(defaultHosts.attachmentHosts.includes('qqbot.ugcimg.cn'));
 
+  // Legacy configs carrying the old 4 auto-generated default hosts auto-upgrade to SSRF-guarded open HTTPS mode
   const upgradedLegacyHosts = parseConfig(
     {
       stateDir: './state',
       t3: { origin: 'http://127.0.0.1:3773' },
       bridge: { port: 18773 },
-      attachmentHosts: [...LEGACY_DEFAULT_ATTACHMENT_HOSTS, 'custom.cdn.example.com'],
+      attachmentHosts: [...LEGACY_DEFAULT_ATTACHMENT_HOSTS, 'qqbot.ugcimg.cn'],
       bindings: [],
     },
     basePath,
   );
-  assert.ok(upgradedLegacyHosts.attachmentHosts.includes('qqbot.ugcimg.cn'));
-  assert.ok(upgradedLegacyHosts.attachmentHosts.includes('*.nt.qq.com'));
-  assert.ok(upgradedLegacyHosts.attachmentHosts.includes('*.ftn.qq.com'));
-  assert.ok(upgradedLegacyHosts.attachmentHosts.includes('custom.cdn.example.com'));
+  assert.deepEqual(upgradedLegacyHosts.attachmentHosts, []);
+
+  // Explicit custom allowlist (not containing the legacy default set) is still respected
+  assert.equal(isHostAllowed('multimedia.nt.qq.com', parsed.attachmentHosts), true);
+  assert.equal(isHostAllowed('grouptalk.c2c.qq.com', parsed.attachmentHosts), false);
 
   // Attachments config defaults and custom overrides
   assert.equal(defaultHosts.attachments.maxInboundBytes, 200 * 1024 * 1024);

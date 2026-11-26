@@ -18,19 +18,7 @@
     "requireMentionInGroup": true,
     "stripPrefix": ""
   },
-  "attachmentHosts": [
-    "multimedia.nt.qq.com.cn",
-    "multimedia.nt.qq.com",
-    "gchat.qpic.cn",
-    "c2cpicdw.qpic.cn",
-    "qqbot.ugcimg.cn",
-    "*.nt.qq.com.cn",
-    "*.nt.qq.com",
-    "*.ftn.qq.com",
-    "*.qpic.cn",
-    "*.ugcimg.cn",
-    "*.gtimg.cn"
-  ],
+  "attachmentHosts": [],
   "attachments": {
     "maxInboundBytes": 209715200,
     "maxPerMessage": 10,

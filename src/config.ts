@@ -28,16 +28,13 @@ export const LEGACY_DEFAULT_ATTACHMENT_HOSTS = [
   'c2cpicdw.qpic.cn',
 ];
 
-export const DEFAULT_ATTACHMENT_HOSTS = [
-  ...LEGACY_DEFAULT_ATTACHMENT_HOSTS,
-  'qqbot.ugcimg.cn',
-  '*.nt.qq.com.cn',
-  '*.nt.qq.com',
-  '*.ftn.qq.com',
-  '*.qpic.cn',
-  '*.ugcimg.cn',
-  '*.gtimg.cn',
-];
+/**
+ * Default inbound attachment host allowlist is empty (= allow any public HTTPS host
+ * protected by built-in SSRF checks: HTTPS-only, no non-default ports/userinfo, no IP
+ * literals, no localhost, and DNS private/loopback/link-local/CGNAT IP blocking).
+ * Users who need strict corporate allowlisting can populate `attachmentHosts` in config.json.
+ */
+export const DEFAULT_ATTACHMENT_HOSTS: string[] = [];
 
 export const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
@@ -165,12 +162,13 @@ export function parseConfig(raw: RawPluginConfig, configPath: string): ResolvedP
     }
   }
   const configuredHostSet = new Set(configuredHosts);
+  // Upgrade legacy configs that still carry the old auto-generated 4-host default list
+  // to the default SSRF-guarded open HTTPS mode (empty allowlist), while preserving
+  // deliberately tightened custom allowlists (e.g. a single specific host).
   const attachmentHosts =
-    configuredHosts.length === 0
+    configuredHosts.length === 0 || LEGACY_DEFAULT_ATTACHMENT_HOSTS.every(host => configuredHostSet.has(host))
       ? [...DEFAULT_ATTACHMENT_HOSTS]
-      : LEGACY_DEFAULT_ATTACHMENT_HOSTS.every(host => configuredHostSet.has(host))
-        ? [...new Set([...configuredHosts, ...DEFAULT_ATTACHMENT_HOSTS])]
-        : configuredHosts;
+      : configuredHosts;
 
   const parseBoundedInt = (
     value: number | undefined,

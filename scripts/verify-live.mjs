@@ -217,7 +217,7 @@ try {
       { status: 200, headers: { 'content-type': 'video/mp4', 'content-length': String(chunkCount * 1024 * 1024) } },
     );
   const saved = await saveAttachment(
-    { url: 'https://video.nt.qq.com/clip', filename: 'speech_bg.mp4', content_type: 'video/mp4' },
+    { url: 'https://grouptalk.c2c.qq.com/clip', filename: 'speech_bg.mp4', content_type: 'video/mp4' },
     dlDir,
     0,
     DEFAULT_ATTACHMENT_HOSTS,
@@ -227,7 +227,7 @@ try {
   assert.equal(saved.sizeBytes, 16 * 1024 * 1024);
   const dlFiles = await readdir(dlDir);
   assert.equal(dlFiles.some(f => f.endsWith('.part')), false, 'Leftover .part temp file detected!');
-  console.log(`[5/6] 流式入站落盘实测通过 (16 MiB MP4 via wildcard *.nt.qq.com, format=${saved.format}, 0 .part 残留)`);
+  console.log(`[5/6] 流式入站落盘实测通过 (16 MiB MP4 via open HTTPS + SSRF guard, format=${saved.format}, 0 .part 残留)`);
 
   // [6/6] Outbound safeArtifact real filesystem matrix (PNG / 16 MiB MP4 / SILK / >100 MiB reject)
   const outWs = join(workDir, 'outbound-ws');

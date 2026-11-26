@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { lookup as dnsLookup } from 'node:dns/promises';
 import { once } from 'node:events';
 import { createWriteStream } from 'node:fs';
 import { copyFile, mkdir, realpath, rename, stat, unlink } from 'node:fs/promises';
@@ -242,9 +243,65 @@ export function sanitizeDisplayFileName(rawName: string | undefined, fallback: s
 
 function isIpOrLoopbackHost(host: string): boolean {
   if (!host) return true;
-  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    host.endsWith('.arpa')
+  ) {
+    return true;
+  }
   if (host.includes(':') || host.startsWith('[')) return true;
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return true;
+  if (!host.includes('.')) return true;
+  return false;
+}
+
+/**
+ * Returns true if an IPv4 or IPv6 address belongs to a loopback, private, link-local,
+ * metadata, or CGNAT range that must be blocked for SSRF protection.
+ * Deliberately allows `198.18.0.0/15` (RFC 2544 benchmark / Clash & Mihomo TUN Fake-IP).
+ */
+export function isBlockedIpAddress(rawIp: string): boolean {
+  const ip = rawIp.trim().toLowerCase();
+  if (!ip) return true;
+
+  // Handle IPv4-mapped IPv6 addresses like `::ffff:127.0.0.1` or `::ffff:7f00:1`
+  if (ip.startsWith('::ffff:')) {
+    const rest = ip.slice('::ffff:'.length);
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(rest)) {
+      return isBlockedIpAddress(rest);
+    }
+    const hexMatch = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(rest);
+    if (hexMatch) {
+      const hi = Number.parseInt(hexMatch[1], 16);
+      const lo = Number.parseInt(hexMatch[2], 16);
+      return isBlockedIpAddress(`${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`);
+    }
+  }
+
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+  if (v4) {
+    const [a, b, c, d] = v4.slice(1).map(Number);
+    if (a > 255 || b > 255 || c > 255 || d > 255) return true;
+    if (a === 0) return true; // 0.0.0.0/8
+    if (a === 10) return true; // 10.0.0.0/8 (RFC1918)
+    if (a === 127) return true; // 127.0.0.0/8 (loopback)
+    if (a === 169 && b === 254) return true; // 169.254.0.0/16 (link-local & cloud metadata)
+    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12 (RFC1918)
+    if (a === 192 && b === 168) return true; // 192.168.0.0/16 (RFC1918)
+    if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 (CGNAT / Tailscale)
+    if (a >= 224) return true; // multicast / reserved
+    return false;
+  }
+
+  // IPv6 checks
+  const cleaned = ip.split('%')[0];
+  if (cleaned === '::' || cleaned === '::1') return true;
+  if (/^f[cd][0-9a-f]{2}:/.test(cleaned)) return true; // fc00::/7 ULA
+  if (/^fe[89ab][0-9a-f]:/.test(cleaned)) return true; // fe80::/10 link-local
+  if (/^ff[0-9a-f]{2}:/.test(cleaned)) return true; // ff00::/8 multicast
   return false;
 }
 
@@ -441,7 +498,9 @@ export function detectExtension(bytes: Buffer, fallbackName: string, contentType
 
 const MAX_ATTACHMENT_REDIRECTS = 2;
 
-function parseAllowedAttachmentUrl(rawUrl: string, hosts: Iterable<string>): URL {
+export type DnsLookupFn = (hostname: string) => Promise<{ address: string }[]>;
+
+function parseAllowedAttachmentUrl(rawUrl: string, hosts: readonly string[]): URL {
   const trimmed = rawUrl.trim();
   const normalized = trimmed.startsWith('//')
     ? `https:${trimmed}`
@@ -454,12 +513,14 @@ function parseAllowedAttachmentUrl(rawUrl: string, hosts: Iterable<string>): URL
   } catch {
     throw new AttachmentError('INVALID_URL', `Invalid QQ attachment URL: ${rawUrl}`);
   }
+  const hasExplicitAllowlist = hosts.length > 0;
   if (
     url.protocol !== 'https:' ||
     url.port ||
     url.username ||
     url.password ||
-    !isHostAllowed(url.hostname, hosts)
+    isIpOrLoopbackHost(url.hostname.toLowerCase()) ||
+    (hasExplicitAllowlist && !isHostAllowed(url.hostname, hosts))
   ) {
     throw new AttachmentError('HOST_NOT_ALLOWED', `Unrecognized QQ attachment origin: ${url.hostname}`, {
       host: url.hostname,
@@ -468,8 +529,28 @@ function parseAllowedAttachmentUrl(rawUrl: string, hosts: Iterable<string>): URL
   return url;
 }
 
+async function verifyPublicDnsResolution(hostname: string, lookupImpl: DnsLookupFn): Promise<void> {
+  let records: { address: string }[];
+  try {
+    records = await lookupImpl(hostname);
+  } catch {
+    // Let fetch surface the real network/DNS error cleanly
+    return;
+  }
+  for (const record of records) {
+    if (isBlockedIpAddress(record.address)) {
+      throw new AttachmentError(
+        'HOST_NOT_ALLOWED',
+        `Blocked QQ attachment origin resolving to private/loopback IP: ${hostname} (${record.address})`,
+        { host: hostname },
+      );
+    }
+  }
+}
+
 export type SaveAttachmentOptions = {
   fetchImpl?: typeof fetch;
+  lookupImpl?: DnsLookupFn;
   maxBytes?: number;
   idleTimeoutMs?: number;
   totalTimeoutMs?: number;
@@ -505,12 +586,18 @@ export async function saveAttachment(
   const opts: SaveAttachmentOptions =
     typeof fetchOrOptions === 'function' ? { fetchImpl: fetchOrOptions } : fetchOrOptions;
   const fetchImpl = opts.fetchImpl ?? fetch;
+  const hostList = [...hosts];
+  const lookupImpl: DnsLookupFn | undefined =
+    opts.lookupImpl ?? (fetchImpl === fetch ? host => dnsLookup(host, { all: true }) : undefined);
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_INBOUND_ATTACHMENT_BYTES;
   const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_DOWNLOAD_IDLE_TIMEOUT_MS;
   const totalTimeoutMs = opts.totalTimeoutMs ?? DEFAULT_DOWNLOAD_TOTAL_TIMEOUT_MS;
   const displayHint = item.filename?.trim() || undefined;
 
-  let currentUrl = parseAllowedAttachmentUrl(item.url, hosts);
+  let currentUrl = parseAllowedAttachmentUrl(item.url, hostList);
+  if (lookupImpl) {
+    await verifyPublicDnsResolution(currentUrl.hostname, lookupImpl);
+  }
   const overallController = new AbortController();
   const overallTimer = setTimeout(() => {
     overallController.abort(
@@ -572,7 +659,10 @@ export async function saveAttachment(
             { status: response.status, fileName: displayHint },
           );
         }
-        currentUrl = parseAllowedAttachmentUrl(new URL(location, currentUrl).href, hosts);
+        currentUrl = parseAllowedAttachmentUrl(new URL(location, currentUrl).href, hostList);
+        if (lookupImpl) {
+          await verifyPublicDnsResolution(currentUrl.hostname, lookupImpl);
+        }
         continue;
       }
       break;
