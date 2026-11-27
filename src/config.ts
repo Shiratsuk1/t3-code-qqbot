@@ -18,7 +18,7 @@ import type {
   ResolvedPluginConfig,
 } from './types.ts';
 
-export const APP_VERSION = '1.2.5';
+export const APP_VERSION = '1.2.6';
 export const SELF_UPDATE_EXIT_CODE = 75;
 
 export const LEGACY_DEFAULT_ATTACHMENT_HOSTS = [

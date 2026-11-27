@@ -4,6 +4,22 @@
 
 ---
 
+## [v1.2.6] — 2026-11-28
+
+### 修复与增强
+- **彻底修复 QQ 私聊流式输出遇到 T3 内部链接卡半截与降级双气泡问题**：
+  - 新增出站文本清洗器 `sanitizeOutboundQQText`，在流式帧、普通文本及后台汇报切片前自动将 `t3-thread://`、`file://`、`conversation://`、`vscode://` 等非公网协议 Markdown 链接转换为纯文本 `「标题」`（避免双层套娃、移除空标题、保护围栏代码块/行内代码与正常 `http(s)://` 链接，并防护流式未闭合尾部链接与裸内部协议链接），保留流式 Markdown 渲染效果。
+  - 修复 `StreamSession` `logger.error`（带有限集合去重防刷屏）与 `stream.session.complete()` `catch` 吞异常问题，完整记录 `httpStatus`、`bizCode`、`bizMessage` 等排障字段。
+  - 已建泡终帧若因其他链接策略失败，先尝试在原气泡补发剥离全部 Markdown 链接的 `DONE` 终帧收口，尽量不残留半截死气泡。
+  - 新增可配置开关 `bridge.enableStreaming`（默认 `true`，支持 `config.json` 与 `t3-qqbot config set bridge.enableStreaming false`）。
+- **附件收发链路、反 SSRF 与引用消息全面升级**：
+  - 入站附件从易失效的静态 CDN 域名白名单改为内置 **HTTPS + DNS 反 SSRF 校验**（拦截本机/私网/链路本地/云元数据/CGNAT IP，兼容 Clash `198.18.0.0/15` Fake-IP；同时仍支持按需填写 `attachmentHosts` 收紧白名单）；
+  - 支持流式下载落盘与大文件分级交付（默认单件 200 MiB / 单消息 10 件，可在 `attachments` 自定义；`≤ 10 MiB` 图片走原生图片、`≤ 50 MiB` 走原生流式文件、超出 50 MiB 自动工作区落盘并附本地绝对路径交付），补充引用消息上下文提取与持久会话列表缓存；
+  - 新增面向本机真实 T3 Code 的无 Mock 契约验收脚本 `npm run verify:live`，新增品牌视觉资产与架构总览图。
+- 单元测试扩充至 **51 项全通**。
+
+---
+
 ## [v1.2.5] — 2026-11-26
 
 ### 修复与增强
