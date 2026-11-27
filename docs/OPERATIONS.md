@@ -121,7 +121,11 @@ gh release create v<版本号> \
   --title "v<版本号> — <简体中文一句话摘要>" \
   --notes-file <简体中文发布说明.md>
 
-# 4. 同步发布到 npm（账号开启 2FA 时按终端提示完成浏览器或 --otp 验证）
+# 4. 同步发布到 npm：
+#    - 推荐（长效免 Token）：在 npmjs.com 包设置中配置 Trusted Publisher（GitHub Actions: Shiratsuk1 / t3-code-qqbot / publish.yml），
+#      创建 GitHub Release 后将自动通过 OIDC 无密钥发布并生成 provenance，或手动执行：
+#      gh workflow run publish.yml
+#    - 手工兜底（如未启用 OIDC）：
 npm publish --access public
 npm view t3-code-qqbot version
 ```

@@ -1,0 +1,38 @@
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '可选：指定要发布的分支或 Tag（默认当前默认分支）'
+        required: false
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Set up Node.js 24 (npm >= 11.5.1 for OIDC Trusted Publishing)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Verify npm CLI supports OIDC Trusted Publishing
+        run: node -e "const v = require('node:child_process').execSync('npm --version',{encoding:'utf8'}).trim(); console.log('npm', v); const [maj,min,pat]=v.split('.').map(Number); if(maj<11||(maj===11&&(min<5||(min===5&&pat<1)))) process.exit(1);"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify and publish via OIDC (no NPM_TOKEN required)
+        run: npm publish --access public
