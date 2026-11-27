@@ -812,3 +812,448 @@ export async function copyStagedAttachment(
     fileName: source.fileName,
   };
 }
+
+export type SanitizeOutboundQQTextOptions = {
+  streaming?: boolean;
+  stripAllMarkdownLinks?: boolean;
+};
+
+const URI_SCHEME_RE = /^([a-zA-Z][a-zA-Z0-9+.-]*):/;
+const BARE_URI_PREFIX_RE = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//;
+const SCHEME_CHAR_RE = /[a-zA-Z0-9+.-]/;
+const BARE_URI_STOP_CHAR_RE = /[\s<>，。；：！？、（）《》【】「」『』“”‘’]/;
+const BARE_URI_TRAILING_PUNCT_RE = /^[.,;:!?'"\}]$/;
+const PUBLIC_LINK_SCHEMES = new Set(['http', 'https']);
+
+function isAsciiLetter(code: number): boolean {
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function isAlreadyBracketWrapped(label: string): boolean {
+  if (!label.startsWith('「') || !label.endsWith('」') || label.length < 2) {
+    return false;
+  }
+  let depth = 0;
+  for (let i = 0; i < label.length; i++) {
+    if (label[i] === '「') {
+      depth++;
+    } else if (label[i] === '」') {
+      depth--;
+      if (depth === 0 && i < label.length - 1) {
+        return false;
+      }
+      if (depth < 0) {
+        return false;
+      }
+    }
+  }
+  return depth === 0;
+}
+
+function formatSanitizedLinkLabel(rawLabel: string): string {
+  const label = rawLabel.trim();
+  if (!label) return '';
+  return isAlreadyBracketWrapped(label) ? label : `「${label}」`;
+}
+
+function findClosingBackticks(text: string, startAfterOpen: number, tickLen: number, limit: number): number {
+  let k = startAfterOpen;
+  while (k < limit) {
+    if (text[k] === '`') {
+      let run = 1;
+      while (k + run < limit && text[k + run] === '`') run++;
+      if (run === tickLen) return k;
+      k += run;
+      continue;
+    }
+    k++;
+  }
+  return -1;
+}
+
+function parseOptionalLinkTitleEnd(text: string, start: number): number {
+  let k = start;
+  while (k < text.length && (text[k] === ' ' || text[k] === '\t')) k++;
+  if (k < text.length && text[k] === ')') return k;
+  if (k >= text.length) return -1;
+  const quote = text[k];
+  if (quote !== '"' && quote !== "'") return -1;
+  k++;
+  while (k < text.length && text[k] !== '\n') {
+    if (text[k] === '\\' && k + 1 < text.length) {
+      k += 2;
+      continue;
+    }
+    if (text[k] === quote) {
+      k++;
+      while (k < text.length && (text[k] === ' ' || text[k] === '\t')) k++;
+      return k < text.length && text[k] === ')' ? k : -1;
+    }
+    k++;
+  }
+  return -1;
+}
+
+function tryParseMarkdownLink(
+  text: string,
+  startIndex: number,
+  options: SanitizeOutboundQQTextOptions,
+): { end: number; replacement: string } | null {
+  const hasBang = text[startIndex] === '!';
+  const bracketStart = hasBang ? startIndex + 1 : startIndex;
+  if (text[bracketStart] !== '[') return null;
+
+  let j = bracketStart + 1;
+  let bracketDepth = 1;
+  while (j < text.length) {
+    const ch = text[j];
+    if (ch === '\\' && j + 1 < text.length) {
+      j += 2;
+      continue;
+    }
+    if (ch === '`') {
+      let tickLen = 1;
+      while (j + tickLen < text.length && text[j + tickLen] === '`') tickLen++;
+      const closeTick = findClosingBackticks(text, j + tickLen, tickLen, text.length);
+      if (closeTick !== -1 && !text.slice(j, closeTick).includes('\n\n')) {
+        j = closeTick + tickLen;
+        continue;
+      }
+      j += tickLen;
+      continue;
+    }
+    if (ch === '\n' && text[j + 1] === '\n') {
+      return null;
+    }
+    if (ch === '[') {
+      bracketDepth++;
+      j++;
+      continue;
+    }
+    if (ch === ']') {
+      bracketDepth--;
+      if (bracketDepth === 0) break;
+      j++;
+      continue;
+    }
+    j++;
+  }
+
+  if (bracketDepth !== 0) return null;
+  const openParen = j + 1;
+  if (openParen >= text.length || text[openParen] !== '(') return null;
+
+  const label = text.slice(bracketStart + 1, j);
+  let destStart = openParen + 1;
+  while (destStart < text.length && (text[destStart] === ' ' || text[destStart] === '\t')) destStart++;
+
+  const isAngle = destStart < text.length && text[destStart] === '<';
+  const schemeStart = isAngle ? destStart + 1 : destStart;
+  if (schemeStart >= text.length || !isAsciiLetter(text.charCodeAt(schemeStart))) return null;
+
+  const schemeMatch = URI_SCHEME_RE.exec(text.slice(schemeStart, schemeStart + 40));
+  if (!schemeMatch) return null;
+
+  const scheme = schemeMatch[1].toLowerCase();
+  const afterColonIdx = schemeStart + schemeMatch[0].length;
+  const isPublic = PUBLIC_LINK_SCHEMES.has(scheme);
+  const shouldRewrite = !isPublic || Boolean(options.stripAllMarkdownLinks);
+
+  if (isAngle) {
+    let k = afterColonIdx;
+    while (k < text.length && text[k] !== '\n') {
+      if (text[k] === '\\' && k + 1 < text.length) {
+        k += 2;
+        continue;
+      }
+      if (text[k] === '<') return null;
+      if (text[k] === '>') {
+        if (k === afterColonIdx) return null;
+        const closeParen = parseOptionalLinkTitleEnd(text, k + 1);
+        if (closeParen === -1) return null;
+        return {
+          end: closeParen + 1,
+          replacement: shouldRewrite ? formatSanitizedLinkLabel(label) : text.slice(startIndex, closeParen + 1),
+        };
+      }
+      k++;
+    }
+    if (k === text.length && options.streaming && shouldRewrite) {
+      return { end: text.length, replacement: formatSanitizedLinkLabel(label) };
+    }
+    return null;
+  }
+
+  // Reject prose like `[A](note: see below)` where whitespace immediately follows `:`
+  if (afterColonIdx < text.length && /\s/.test(text[afterColonIdx])) {
+    return null;
+  }
+
+  let k = afterColonIdx;
+  let parenDepth = 0;
+  while (k < text.length) {
+    const ch = text[k];
+    if (ch === '\\' && k + 1 < text.length) {
+      k += 2;
+      continue;
+    }
+    if (ch === '\n') return null;
+    if (ch === '(') {
+      parenDepth++;
+      k++;
+      continue;
+    }
+    if (ch === ')') {
+      if (parenDepth === 0) {
+        if (k === afterColonIdx) return null;
+        return {
+          end: k + 1,
+          replacement: shouldRewrite ? formatSanitizedLinkLabel(label) : text.slice(startIndex, k + 1),
+        };
+      }
+      parenDepth--;
+      k++;
+      continue;
+    }
+    if (ch === ' ' || ch === '\t') {
+      const titleClose = parseOptionalLinkTitleEnd(text, k);
+      if (titleClose !== -1 && k > afterColonIdx) {
+        return {
+          end: titleClose + 1,
+          replacement: shouldRewrite ? formatSanitizedLinkLabel(label) : text.slice(startIndex, titleClose + 1),
+        };
+      }
+      if (scheme === 'file') {
+        k++;
+        continue;
+      }
+      return null;
+    }
+    k++;
+  }
+
+  if (k === text.length && options.streaming && shouldRewrite) {
+    return { end: text.length, replacement: formatSanitizedLinkLabel(label) };
+  }
+  return null;
+}
+
+/**
+ * Sanitizes outbound QQ text so non-public internal protocol links (such as
+ * `t3-thread://`, `file://`, `conversation://`, `vscode://`, `mailto:`, `javascript:`, etc.)
+ * are rewritten to `「label」` (or `「内部链接」` for bare URIs) while preserving
+ * fenced code blocks, inline code spans, and normal `http(s)://` links.
+ */
+export function sanitizeOutboundQQText(
+  text: string,
+  options: SanitizeOutboundQQTextOptions = {},
+): string {
+  if (!text) return text;
+
+  let out = '';
+  let i = 0;
+  let atLineStart = true;
+  let inFence: { char: '`' | '~'; len: number } | null = null;
+
+  while (i < text.length) {
+    if (atLineStart) {
+      const lineEndIdx = text.indexOf('\n', i);
+      const lineSliceEnd = lineEndIdx === -1 ? text.length : lineEndIdx + 1;
+      const lineContentEnd =
+        lineEndIdx === -1
+          ? text.length
+          : lineEndIdx > i && text[lineEndIdx - 1] === '\r'
+            ? lineEndIdx - 1
+            : lineEndIdx;
+      const line = text.slice(i, lineContentEnd);
+
+      if (inFence) {
+        const closeMatch = /^[ ]{0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+        if (closeMatch && closeMatch[1][0] === inFence.char && closeMatch[1].length >= inFence.len) {
+          inFence = null;
+        }
+        out += text.slice(i, lineSliceEnd);
+        i = lineSliceEnd;
+        atLineStart = true;
+        continue;
+      }
+
+      const openMatch = /^[ ]{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+      if (openMatch) {
+        const fenceChar = openMatch[1][0] as '`' | '~';
+        const info = openMatch[2];
+        // CommonMark: backtick fence info string cannot contain backticks (avoid matching inline ```` ```code``` ````)
+        if (fenceChar === '~' || !info.includes('`')) {
+          inFence = { char: fenceChar, len: openMatch[1].length };
+          out += text.slice(i, lineSliceEnd);
+          i = lineSliceEnd;
+          atLineStart = true;
+          continue;
+        }
+      }
+      atLineStart = false;
+    }
+
+    const ch = text[i];
+    if (ch === '\n') {
+      out += '\n';
+      i++;
+      atLineStart = true;
+      continue;
+    }
+
+    if (ch === '\\' && i + 1 < text.length && text[i + 1] !== '\n' && text[i + 1] !== '\r') {
+      out += ch + text[i + 1];
+      i += 2;
+      continue;
+    }
+
+    if (ch === '`') {
+      let tickLen = 1;
+      while (i + tickLen < text.length && text[i + tickLen] === '`') tickLen++;
+      const closeTick = findClosingBackticks(text, i + tickLen, tickLen, text.length);
+      if (closeTick !== -1 && !text.slice(i, closeTick).includes('\n\n')) {
+        out += text.slice(i, closeTick + tickLen);
+        i = closeTick + tickLen;
+      } else {
+        out += text.slice(i, i + tickLen);
+        i += tickLen;
+      }
+      continue;
+    }
+
+    if (ch === '[' || (ch === '!' && text[i + 1] === '[')) {
+      const parsed = tryParseMarkdownLink(text, i, options);
+      if (parsed) {
+        out += parsed.replacement;
+        i = parsed.end;
+        continue;
+      }
+    }
+
+    if (ch === '<' && i + 1 < text.length && isAsciiLetter(text.charCodeAt(i + 1))) {
+      const autolinkMatch = BARE_URI_PREFIX_RE.exec(text.slice(i + 1, i + 41));
+      if (autolinkMatch) {
+        const scheme = autolinkMatch[1].toLowerCase();
+        if (!PUBLIC_LINK_SCHEMES.has(scheme)) {
+          let end = i + 1 + autolinkMatch[0].length;
+          while (end < text.length && !/[\s<>]/.test(text[end])) end++;
+          if (end < text.length && text[end] === '>') {
+            out += '「内部链接」';
+            i = end + 1;
+            continue;
+          }
+          if (end === text.length && options.streaming) {
+            out += '「内部链接」';
+            i = text.length;
+            continue;
+          }
+        }
+      }
+    }
+
+    if (isAsciiLetter(text.charCodeAt(i)) && (i === 0 || !SCHEME_CHAR_RE.test(text[i - 1]))) {
+      const bareMatch = BARE_URI_PREFIX_RE.exec(text.slice(i, i + 40));
+      if (bareMatch) {
+        const scheme = bareMatch[1].toLowerCase();
+        if (PUBLIC_LINK_SCHEMES.has(scheme)) {
+          out += bareMatch[0];
+          i += bareMatch[0].length;
+          continue;
+        }
+        const prefixEnd = i + bareMatch[0].length;
+        let end = prefixEnd;
+        let parenDepth = 0;
+        let bracketDepth = 0;
+        while (end < text.length) {
+          const cur = text[end];
+          if (BARE_URI_STOP_CHAR_RE.test(cur)) break;
+          if (cur === '(') {
+            parenDepth++;
+          } else if (cur === ')') {
+            if (parenDepth === 0) break;
+            parenDepth--;
+          } else if (cur === '[') {
+            bracketDepth++;
+          } else if (cur === ']') {
+            if (bracketDepth === 0) break;
+            bracketDepth--;
+          }
+          end++;
+        }
+
+        let trimmedEnd = end;
+        while (trimmedEnd > prefixEnd) {
+          const lastChar = text[trimmedEnd - 1];
+          if (lastChar && BARE_URI_TRAILING_PUNCT_RE.test(lastChar)) {
+            trimmedEnd--;
+            continue;
+          }
+          break;
+        }
+
+        if (trimmedEnd > prefixEnd || options.streaming) {
+          out += '「内部链接」';
+          i = trimmedEnd;
+          continue;
+        }
+        out += bareMatch[0];
+        i = prefixEnd;
+        continue;
+      }
+    }
+
+    out += ch;
+    i++;
+  }
+
+  return out;
+}
+
+/**
+ * Formats QQ Open Platform SDK errors (including `ApiError` fields such as
+ * `httpStatus`, `bizCode`, `bizMessage`, `code`, `path`, and `message`) for diagnostics.
+ */
+export function formatQQApiError(error: unknown): string {
+  if (error === null || error === undefined) return 'unknown error';
+  if (typeof error !== 'object') return String(error);
+
+  const err = error as Record<string, unknown>;
+  const parts: string[] = [];
+
+  if (typeof err.httpStatus === 'number') {
+    parts.push(`httpStatus=${err.httpStatus}`);
+  }
+  const bizCode = err.bizCode ?? err.err_code;
+  if (typeof bizCode === 'number' || (typeof bizCode === 'string' && bizCode.trim())) {
+    parts.push(`bizCode=${bizCode}`);
+  }
+  if (typeof err.bizMessage === 'string' && err.bizMessage.trim()) {
+    parts.push(`bizMessage=${JSON.stringify(err.bizMessage.trim())}`);
+  }
+  if (
+    (typeof err.code === 'number' || (typeof err.code === 'string' && err.code.trim())) &&
+    err.code !== bizCode
+  ) {
+    parts.push(`code=${err.code}`);
+  }
+  if (typeof err.path === 'string' && err.path.trim()) {
+    parts.push(`path=${err.path.trim()}`);
+  }
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof err.message === 'string'
+        ? err.message
+        : '';
+  if (message.trim()) {
+    parts.push(`message=${message.trim()}`);
+  }
+
+  if (parts.length > 0) return parts.join(' ');
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}

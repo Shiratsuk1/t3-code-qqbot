@@ -77,6 +77,7 @@ export type BridgeConfig = {
   maxMessageChars?: number;
   autoSettleThread?: boolean;
   enableSlashCommands?: boolean;
+  enableStreaming?: boolean;
   testStaging?: string;
 };
 
@@ -140,6 +141,7 @@ export type ResolvedPluginConfig = {
     maxMessageChars: number;
     autoSettleThread: boolean;
     enableSlashCommands: boolean;
+    enableStreaming: boolean;
     testStaging?: string;
   };
   gateway: {

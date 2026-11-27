@@ -3,17 +3,20 @@ import { mkdir, mkdtemp, open, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { ApiError } from '@tencent-connect/qqbot-nodejs';
 import {
   AttachmentError,
   detectExtension,
   digest,
   formatByteSize,
+  formatQQApiError,
   isBlockedIpAddress,
   isHostAllowed,
   isT3NativeImageMime,
   isValidAttachmentHostPattern,
   mimeFromExtension,
   safeArtifact,
+  sanitizeOutboundQQText,
   saveAttachment,
 } from '../src/protocol.ts';
 
@@ -275,4 +278,189 @@ test('saveAttachment validates allowlist, streams >12 MiB files, fast-rejects Co
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('sanitizeOutboundQQText rewrites non-public Markdown links, avoids double brackets, preserves http(s) and code', () => {
+  assert.equal(
+    sanitizeOutboundQQText('已定位到 [示例会话](t3-thread://v2/demo-thread-001/mcp:98765)，请查收。'),
+    '已定位到 「示例会话」，请查收。',
+  );
+  // Avoid double wrapping when label already has 「...」
+  assert.equal(
+    sanitizeOutboundQQText('查看 [「示例会话」](t3-thread://v2/demo-thread-001/mcp:1) 与 [ 「备忘」 ](file:///C:/a.md)'),
+    '查看 「示例会话」 与 「备忘」',
+  );
+  // Empty/whitespace labels dropped cleanly
+  assert.equal(
+    sanitizeOutboundQQText('前[](t3-thread://v2/abc)中[   ](file:///a.txt)后'),
+    '前中后',
+  );
+  // All common non-public schemes
+  assert.equal(
+    sanitizeOutboundQQText(
+      [
+        '[notes.md](file:///C:/Users/demo/notes.md#L10-L20)',
+        '[历史对话](conversation://00000000-0000-4000-8000-000000000001)',
+        '[打开编辑器](vscode://file/C:/repo/a.ts:10)',
+        '[发邮件](mailto:test@example.com)',
+        '[拨号](tel:+86-10086)',
+        '[脚本](javascript:void(0))',
+        '[内联](data:text/plain;base64,SGVsbG8=)',
+        '[下载](blob:https://example.com/uuid)',
+      ].join(' / '),
+    ),
+    '「notes.md」 / 「历史对话」 / 「打开编辑器」 / 「发邮件」 / 「拨号」 / 「脚本」 / 「内联」 / 「下载」',
+  );
+  // Balanced parentheses in label and URL, angle brackets, optional titles, and spaces in file://
+  assert.equal(
+    sanitizeOutboundQQText(
+      '[第1讲 (修订版)](t3-thread://v2/abc(1)/mcp:2) [说明](file:///C:/Program%20Files_(x86)/a.md) [空格路径](file:///C:/My Folder/a (1).md) [尖括号](<t3-thread://v2/abc>) [带提示](t3-thread://v2/abc "tip")',
+    ),
+    '「第1讲 (修订版)」 「说明」 「空格路径」 「尖括号」 「带提示」',
+  );
+  // Preserve valid http(s) links by default (including balanced parens), strip when stripAllMarkdownLinks=true
+  const httpSample = '参考 [Wiki](https://en.wikipedia.org/wiki/C_(programming_language)) 和 [站点](http://example.com/docs)';
+  assert.equal(sanitizeOutboundQQText(httpSample), httpSample);
+  assert.equal(
+    sanitizeOutboundQQText(httpSample, { stripAllMarkdownLinks: true }),
+    '参考 「Wiki」 和 「站点」',
+  );
+  // Preserve prose / non-URI parenthesized expressions
+  const prose = '[引用消息] 时间 12:30，[备注](note: see below)，数组 a[0] = (1 + 2)';
+  assert.equal(sanitizeOutboundQQText(prose), prose);
+  // Preserve fenced code blocks (``` and ~~~) and inline code spans untouched
+  const withCode = [
+    '正文 [hi](t3-thread://v2/1/mcp:2) 与 `[keep](t3-thread://v2/inline)` 及 `` `t3-thread://v2/double` ``。',
+    '```markdown',
+    '[inside-fence](t3-thread://v2/fence/mcp:3)',
+    't3-thread://v2/bare-in-fence',
+    '```',
+    '~~~text',
+    '[tilde-fence](file:///C:/secret.txt)',
+    '~~~',
+    '尾部 [done](conversation://xyz)。',
+  ].join('\n');
+  assert.equal(
+    sanitizeOutboundQQText(withCode),
+    [
+      '正文 「hi」 与 `[keep](t3-thread://v2/inline)` 及 `` `t3-thread://v2/double` ``。',
+      '```markdown',
+      '[inside-fence](t3-thread://v2/fence/mcp:3)',
+      't3-thread://v2/bare-in-fence',
+      '```',
+      '~~~text',
+      '[tilde-fence](file:///C:/secret.txt)',
+      '~~~',
+      '尾部 「done」。',
+    ].join('\n'),
+  );
+  // Trailing backslash before newline must not swallow opening code fence on next line
+  const trailingBackslashBeforeFence = [
+    '目录路径 C:\\demo\\',
+    '```markdown',
+    '[keep-in-fence](t3-thread://v2/demo-fence/mcp:1)',
+    '```',
+    '后续 [外部链接](t3-thread://v2/demo-after/mcp:2)',
+  ].join('\n');
+  assert.equal(
+    sanitizeOutboundQQText(trailingBackslashBeforeFence),
+    [
+      '目录路径 C:\\demo\\',
+      '```markdown',
+      '[keep-in-fence](t3-thread://v2/demo-fence/mcp:1)',
+      '```',
+      '后续 「外部链接」',
+    ].join('\n'),
+  );
+  // Unclosed stray backtick in paragraph 1 must not span across \n\n to suppress sanitizing paragraph 2
+  const strayBacktickAcrossParagraphs = [
+    '第一段包含一个未闭合反引号 ` 示例',
+    '',
+    '第二段包含 [示例会话](t3-thread://v2/demo-thread-002/mcp:7)',
+    '',
+    '第三段包含 `正常代码` 片段',
+  ].join('\n');
+  assert.equal(
+    sanitizeOutboundQQText(strayBacktickAcrossParagraphs),
+    [
+      '第一段包含一个未闭合反引号 ` 示例',
+      '',
+      '第二段包含 「示例会话」',
+      '',
+      '第三段包含 `正常代码` 片段',
+    ].join('\n'),
+  );
+  // stripAllMarkdownLinks still preserves code blocks and inline code
+  assert.equal(
+    sanitizeOutboundQQText('看 [文档](https://a.example) 和 `[文档](https://a.example)`', {
+      stripAllMarkdownLinks: true,
+    }),
+    '看 「文档」 和 `[文档](https://a.example)`',
+  );
+});
+
+test('sanitizeOutboundQQText handles streaming incomplete links and bare internal URIs with trailing punctuation', () => {
+  // Streaming incomplete non-public links at end of buffer
+  assert.equal(
+    sanitizeOutboundQQText('正在整理 [示例会话](t3-thread://v2/demo-thread', { streaming: true }),
+    '正在整理 「示例会话」',
+  );
+  assert.equal(
+    sanitizeOutboundQQText('正在整理 [示例会话](t3-thread:', { streaming: true }),
+    '正在整理 「示例会话」',
+  );
+  assert.equal(
+    sanitizeOutboundQQText('正在整理 [「示例会话」](file:///C:/Users/demo', { streaming: true }),
+    '正在整理 「示例会话」',
+  );
+  assert.equal(
+    sanitizeOutboundQQText('正在整理 [](t3-thread://v2/demo-thread', { streaming: true }),
+    '正在整理 ',
+  );
+  // Streaming incomplete https:// link is preserved when stripAllMarkdownLinks is false
+  assert.equal(
+    sanitizeOutboundQQText('正在整理 [官网](https://example.com/ab', { streaming: true }),
+    '正在整理 [官网](https://example.com/ab',
+  );
+  // Bare internal URIs neutralized while keeping Chinese & ASCII trailing punctuation intact
+  assert.equal(
+    sanitizeOutboundQQText('请查看 t3-thread://v2/demo-thread-001/mcp:123。'),
+    '请查看 「内部链接」。',
+  );
+  assert.equal(
+    sanitizeOutboundQQText('（详见 conversation://abc-123），或参考 [file:///C:/a/b.ts] 与 (t3-thread://v2/xyz)。下一句'),
+    '（详见 「内部链接」），或参考 [「内部链接」] 与 (「内部链接」)。下一句',
+  );
+  assert.equal(
+    sanitizeOutboundQQText('请看(t3-thread://v2/abc)然后继续，以及 file:///C:/Program_Files_(x86)/app.exe。'),
+    '请看(「内部链接」)然后继续，以及 「内部链接」。',
+  );
+  assert.equal(
+    sanitizeOutboundQQText('尖括号 <t3-thread://v2/abc> 和正常链接 https://example.com/path。'),
+    '尖括号 「内部链接」 和正常链接 https://example.com/path。',
+  );
+});
+
+test('formatQQApiError extracts structured ApiError and generic error fields cleanly', () => {
+  const apiErr = new ApiError(
+    'API request failed',
+    400,
+    '/v2/users/U1/stream_messages',
+    304003,
+    'invalid markdown url',
+  );
+  const formatted = formatQQApiError(apiErr);
+  assert.match(formatted, /httpStatus=400/);
+  assert.match(formatted, /bizCode=304003/);
+  assert.match(formatted, /bizMessage="invalid markdown url"/);
+  assert.match(formatted, /path=\/v2\/users\/U1\/stream_messages/);
+  assert.match(formatted, /message=API request failed/);
+
+  const nodeErr = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+  const nodeFormatted = formatQQApiError(nodeErr);
+  assert.match(nodeFormatted, /code=ECONNRESET/);
+  assert.match(nodeFormatted, /message=socket hang up/);
+
+  assert.equal(formatQQApiError(null), 'unknown error');
+  assert.equal(formatQQApiError('plain failure'), 'plain failure');
 });

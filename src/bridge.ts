@@ -5,7 +5,13 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { extname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { QQBot, StreamInputState, StreamSession } from '@tencent-connect/qqbot-nodejs';
+import {
+  QQBot,
+  StreamContentType,
+  StreamInputMode,
+  StreamInputState,
+  StreamSession,
+} from '@tencent-connect/qqbot-nodejs';
 import { ApiClient, MessageApi } from '@tencent-connect/qqbot-nodejs/protocol';
 import {
   findBindingForScope,
@@ -23,14 +29,17 @@ import {
   digest,
   digestBuffer,
   formatByteSize,
+  formatQQApiError,
   isT3NativeImageMime,
   mimeFromExtension,
+  sanitizeOutboundQQText,
   saveAttachment,
   T3_MAX_FILE_BYTES,
   T3_MAX_IMAGE_BYTES,
   T3_MAX_TOTAL_IMAGE_BYTES,
 } from './protocol.ts';
 import type { SavedAttachment } from './protocol.ts';
+export { formatQQApiError };
 import { migrateLegacyWindowsServiceTask } from './service.ts';
 import {
   createSlashCommandHandler,
@@ -181,12 +190,25 @@ function resolveAttachmentMime(filePath: string, rawContentType?: string): strin
   return fromExt;
 }
 
+type StreamSessionInternal = {
+  pendingText: string;
+  streamMsgId?: string;
+  index: number;
+  msgSeq: number | null;
+  eventId: string;
+};
+
 class ReplyStreamApi extends MessageApi {
   readonly key: string;
   readonly runId: string;
   readonly itemId: string;
   readonly logTiming: (stage: string, key: string, runId: string, ...details: (string | number)[]) => void;
+  readonly sendOverride?: MessageApi['sendC2CStreamMessage'];
   hasLiveBubble = false;
+  streamMsgId?: string;
+  lastMsgSeq?: number;
+  lastIndex?: number;
+  lastError?: unknown;
 
   constructor(
     client: ApiClient,
@@ -195,21 +217,35 @@ class ReplyStreamApi extends MessageApi {
     runId: string,
     itemId: string,
     logTiming: (stage: string, key: string, runId: string, ...details: (string | number)[]) => void,
+    sendOverride?: MessageApi['sendC2CStreamMessage'],
   ) {
     super(client, tokens, { markdownSupport: false });
     this.key = key;
     this.runId = runId;
     this.itemId = itemId;
     this.logTiming = logTiming;
+    this.sendOverride = sendOverride;
   }
 
   override async sendC2CStreamMessage(...args: Parameters<MessageApi['sendC2CStreamMessage']>) {
     const started = Date.now();
     const frame = args[2];
+    this.lastMsgSeq = frame.msg_seq;
+    this.lastIndex = frame.index;
     if (frame.index === 0) this.logTiming('first_frame_send', this.key, this.runId, this.itemId);
-    const response = await super.sendC2CStreamMessage(...args);
+    let response: Awaited<ReturnType<MessageApi['sendC2CStreamMessage']>>;
+    try {
+      response = this.sendOverride
+        ? await this.sendOverride(...args)
+        : await super.sendC2CStreamMessage(...args);
+      this.lastError = undefined;
+    } catch (error) {
+      this.lastError = error;
+      throw error;
+    }
     if (response?.id) {
       this.hasLiveBubble = true;
+      this.streamMsgId ??= response.id;
       if (frame.index === 0) {
         this.logTiming('first_frame_ack', this.key, this.runId, this.itemId, Array.from(frame.content_raw).length);
       }
@@ -282,6 +318,10 @@ export async function createBridgeRuntime(
     onAccepted?: (event: InboundEvent, target: Target, binding: ResolvedBinding, scope: string) => Promise<void>;
     checkT3Health?: () => Promise<boolean>;
     onRestartRequested?: () => void;
+    sendText?: (reply: ReplyAddress, text: string) => Promise<{ id?: string }>;
+    sendC2CStreamMessage?: MessageApi['sendC2CStreamMessage'];
+    readReplyImpl?: typeof readReply;
+    withReadSession?: <T>(fn: (token: string) => Promise<T>) => Promise<T>;
   } = {},
 ): Promise<BridgeRuntime> {
   const root = resolve(config.stateDir);
@@ -311,6 +351,8 @@ export async function createBridgeRuntime(
 
   const shutdownController = new AbortController();
   const qq = new QQBot({ appId: credentials.appId, appSecret: credentials.appSecret });
+  const sendText = options.sendText ?? ((target: ReplyAddress, text: string) => qq.sendText(target, text));
+  const readReplyFn = options.readReplyImpl ?? readReply;
   const streamClient = new ApiClient({ defaultTimeoutMs: 10_000 });
   const sharedTokenManager = (qq as unknown as { tokenManager: unknown }).tokenManager;
   const t3Cli = new T3Cli(config.t3);
@@ -392,10 +434,11 @@ export async function createBridgeRuntime(
   }
 
   async function sendChunkedReply(reply: ReplyAddress, text: string): Promise<void> {
-    const chars = Array.from(text);
+    const sanitized = sanitizeOutboundQQText(text);
+    const chars = Array.from(sanitized);
     const maxChars = config.bridge.maxMessageChars;
     for (let offset = 0; offset < chars.length; offset += maxChars) {
-      await qq.sendText(reply, chars.slice(offset, offset + maxChars).join(''));
+      await sendText(reply, chars.slice(offset, offset + maxChars).join(''));
     }
   }
 
@@ -472,7 +515,9 @@ export async function createBridgeRuntime(
             const item = (await observer.read(threadId, 'activity', itemId)).items.find(v => v.itemId === itemId);
             if (!item || item.type !== 'subagent' || item.runId !== runId) return '';
             if (TERMINAL_RUN_STATUSES.has(item.status)) {
-              const summary = `${item.title ?? '后台任务'} · ${item.status}\n${item.text?.trim() ?? ''}`.trim();
+              const summary = sanitizeOutboundQQText(
+                `${item.title ?? '后台任务'} · ${item.status}\n${item.text?.trim() ?? ''}`.trim(),
+              );
               const target = config.bridge.proactiveBackgroundReports
                 ? { scope: reply.scope, targetId: reply.targetId }
                 : reply;
@@ -524,6 +569,7 @@ export async function createBridgeRuntime(
         failedBeforeLive: boolean;
         finishing: boolean;
         lastQueued: string;
+        loggedErrorKeys: Set<string>;
       }
     >();
     const observedItems = new Set<string>();
@@ -536,32 +582,63 @@ export async function createBridgeRuntime(
 
     const updateStream = (item: { id: string; text: string; updatedAt: string }) => {
       markFirstText(item);
-      if (reply.scope !== 'c2c' || !live) return;
+      if (reply.scope !== 'c2c' || !live || !config.bridge.enableStreaming) return;
       let stream = streams.get(item.id);
       if (!stream) {
-        const api = new ReplyStreamApi(streamClient, sharedTokenManager, key, runId, item.id, timing);
+        const api = new ReplyStreamApi(
+          streamClient,
+          sharedTokenManager,
+          key,
+          runId,
+          item.id,
+          timing,
+          options.sendC2CStreamMessage,
+        );
         const session = new StreamSession(api, {
           openid: reply.targetId,
           msgId: reply.msgId,
           creds: { appId: credentials.appId, clientSecret: credentials.appSecret },
           logger: {
             info: () => {},
-            error: () => {
+            error: (message: string, ...args: unknown[]) => {
               const current = streams.get(item.id);
+              const extra = args.length > 0 ? ' ' + args.map(arg => formatQQApiError(arg)).join(' ') : '';
+              const apiDetail = current?.api.lastError ? ` (${formatQQApiError(current.api.lastError)})` : '';
+              const detail = `${message}${extra}${apiDetail}`.trim();
               if (current && !current.finishing && !current.api.hasLiveBubble) {
                 current.failedBeforeLive = true;
                 current.session.cancel();
-                console.info('QQ streaming unavailable before first frame, falling back to normal text', key, runId);
+                console.warn(
+                  'QQ streaming unavailable before first frame, falling back to normal text',
+                  key,
+                  runId,
+                  detail,
+                );
+                return;
               }
+              if (current) {
+                const dedupKey = `${current.finishing ? 'finishing' : 'live'}:${detail}`;
+                if (current.loggedErrorKeys.has(dedupKey) || current.loggedErrorKeys.size >= 32) return;
+                current.loggedErrorKeys.add(dedupKey);
+              }
+              console.warn('QQ stream error', key, runId, detail);
             },
           },
         });
-        stream = { session, api, failedBeforeLive: false, finishing: false, lastQueued: '' };
+        stream = {
+          session,
+          api,
+          failedBeforeLive: false,
+          finishing: false,
+          lastQueued: '',
+          loggedErrorKeys: new Set<string>(),
+        };
         streams.set(item.id, stream);
       }
       if (!stream.failedBeforeLive) {
-        const clipped = Array.from(item.text).slice(0, maxChars).join('');
-        if (clipped !== stream.lastQueued) {
+        const sanitized = sanitizeOutboundQQText(item.text, { streaming: true });
+        const clipped = Array.from(sanitized).slice(0, maxChars).join('');
+        if (clipped && clipped !== stream.lastQueued) {
           stream.lastQueued = clipped;
           void stream.session.update(clipped).catch(() => {});
         }
@@ -571,7 +648,8 @@ export async function createBridgeRuntime(
     const sendMessage = async (item: { id: string; text: string; updatedAt: string }) => {
       markFirstText(item);
       if (live) timing('text_completed', key, runId, item.id, Date.parse(item.updatedAt));
-      const chars = Array.from(item.text);
+      const sanitizedText = sanitizeOutboundQQText(item.text);
+      const chars = Array.from(sanitizedText);
       const sendStarted = Date.now();
       let sentCount = 0;
       const stream = streams.get(item.id);
@@ -595,14 +673,63 @@ export async function createBridgeRuntime(
             if (stream.lastQueued !== content) {
               stream.lastQueued = content;
               // Set pendingText without triggering an unnecessary duplicate GENERATING frame when possible
-              (stream.session as unknown as { pendingText: string }).pendingText = content;
+              (stream.session as unknown as StreamSessionInternal).pendingText = content;
             }
             sent = await stream.session.complete();
-          } catch {
-            console.info('QQ stream completion failed, falling back to normal text', key, runId);
+          } catch (error) {
+            console.warn('QQ stream completion failed', key, runId, formatQQApiError(error));
+            if (stream.api.hasLiveBubble) {
+              const strippedContent = sanitizeOutboundQQText(content, { stripAllMarkdownLinks: true });
+              if (strippedContent && strippedContent !== content) {
+                const internal = stream.session as unknown as StreamSessionInternal;
+                const streamMsgId = internal.streamMsgId ?? stream.api.streamMsgId;
+                const msgSeq = internal.msgSeq ?? stream.api.lastMsgSeq;
+                if (streamMsgId && msgSeq !== null && msgSeq !== undefined) {
+                  try {
+                    const recoveryIndex =
+                      typeof internal.index === 'number'
+                        ? internal.index++
+                        : (stream.api.lastIndex ?? 0) + 1;
+                    const recovered = await stream.api.sendC2CStreamMessage(
+                      { appId: credentials.appId, clientSecret: credentials.appSecret },
+                      reply.targetId,
+                      {
+                        input_mode: StreamInputMode.REPLACE,
+                        input_state: StreamInputState.DONE,
+                        content_type: StreamContentType.MARKDOWN,
+                        content_raw: strippedContent,
+                        event_id: internal.eventId ?? reply.msgId,
+                        msg_id: reply.msgId,
+                        msg_seq: msgSeq,
+                        index: recoveryIndex,
+                        stream_msg_id: streamMsgId,
+                      },
+                    );
+                    if (recovered?.id) {
+                      sent = recovered;
+                      console.info(
+                        'QQ stream recovery DONE frame succeeded with stripped Markdown links',
+                        key,
+                        runId,
+                      );
+                    }
+                  } catch (recoveryError) {
+                    console.warn(
+                      'QQ stream recovery DONE frame failed, falling back to normal text',
+                      key,
+                      runId,
+                      formatQQApiError(recoveryError),
+                    );
+                  }
+                }
+              }
+            }
+            if (!sent?.id) {
+              console.info('QQ stream completion failed, falling back to normal text', key, runId);
+            }
           }
         }
-        sent = sent?.id ? sent : await qq.sendText(reply, content);
+        sent = sent?.id ? sent : await sendText(reply, content);
         if (!sent?.id) throw new Error('QQ did not confirm the text reply');
         await writeFile(receipt, sent.id, { mode: 0o600 });
         sentCount++;
@@ -623,43 +750,46 @@ export async function createBridgeRuntime(
       }
     };
 
-    const result = await t3Cli
-      .withSession({ scopes: ['orchestration:read'], ttl: '45m', label: 'T3 QQBot reply' }, token =>
-        readReply(config.t3.origin, token, threadId, runId, {
-          afterSequence: sequence,
-          signal: shutdownController.signal,
-          onMessage: async item => {
-            try {
-              await sendMessage(item);
-            } catch (error) {
-              console.error(
-                'QQ reply delivery failed',
-                key,
-                runId,
-                error instanceof Error ? error.message : 'unknown error',
-              );
-              throw error;
-            }
-          },
-          onUpdate: updateStream,
-          onTerminal: run => {
-            if (live) timing('run_terminal', key, runId, run.status, run.completedAt ?? '-');
-          },
-        }),
-      )
-      .finally(() => {
-        for (const stream of streams.values()) stream.session.cancel();
-      });
+    const withReadSession =
+      options.withReadSession ??
+      (<T>(fn: (token: string) => Promise<T>) =>
+        t3Cli.withSession({ scopes: ['orchestration:read'], ttl: '45m', label: 'T3 QQBot reply' }, fn));
+
+    const result = await withReadSession(token =>
+      readReplyFn(config.t3.origin, token, threadId, runId, {
+        afterSequence: sequence,
+        signal: shutdownController.signal,
+        onMessage: async item => {
+          try {
+            await sendMessage(item);
+          } catch (error) {
+            console.error(
+              'QQ reply delivery failed',
+              key,
+              runId,
+              formatQQApiError(error),
+            );
+            throw error;
+          }
+        },
+        onUpdate: updateStream,
+        onTerminal: run => {
+          if (live) timing('run_terminal', key, runId, run.status, run.completedAt ?? '-');
+        },
+      }),
+    ).finally(() => {
+      for (const stream of streams.values()) stream.session.cancel();
+    });
 
     if (!result.body) {
       console.info('T3 finished without a text reply', key, runId, result.status);
       if (result.status !== 'completed') {
         const statusText = result.status === 'interrupted' ? '已中断' : `状态：${result.status}`;
-        await qq.sendText(reply, `T3 Code 本轮任务未完成（${statusText}），请在 T3 Code 中查看详情。`).catch(
+        await sendText(reply, `T3 Code 本轮任务未完成（${statusText}），请在 T3 Code 中查看详情。`).catch(
           () => {},
         );
       } else if (emptyCompletedNotice) {
-        await qq.sendText(reply, emptyCompletedNotice).catch(() => {});
+        await sendText(reply, emptyCompletedNotice).catch(() => {});
       }
     }
     if (result.status === 'completed' && result.backgroundTaskIds.length) {

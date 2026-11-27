@@ -65,6 +65,18 @@ test('parseConfig resolves relative paths, normalizes hosts, validates bounds, a
   // Default attachmentHosts is empty (= allow any public HTTPS host with built-in SSRF IP guard)
   assert.deepEqual(defaultHosts.attachmentHosts, []);
   assert.deepEqual(defaultHosts.attachmentHosts, DEFAULT_ATTACHMENT_HOSTS);
+  assert.equal(defaultHosts.bridge.enableStreaming, true);
+
+  const streamingDisabled = parseConfig(
+    {
+      stateDir: './state',
+      t3: { origin: 'http://127.0.0.1:3773' },
+      bridge: { port: 18773, enableStreaming: false },
+      bindings: [],
+    },
+    basePath,
+  );
+  assert.equal(streamingDisabled.bridge.enableStreaming, false);
 
   // Legacy configs carrying the old 4 auto-generated default hosts auto-upgrade to SSRF-guarded open HTTPS mode
   const upgradedLegacyHosts = parseConfig(
@@ -163,6 +175,20 @@ test('parseConfig resolves relative paths, normalizes hosts, validates bounds, a
         basePath,
       ),
     /Invalid bridge\.maxMessageChars/,
+  );
+
+  assert.throws(
+    () =>
+      parseConfig(
+        {
+          stateDir: './state',
+          t3: { origin: 'http://127.0.0.1:3773' },
+          bridge: { port: 18773, enableStreaming: 'false' as unknown as boolean },
+          bindings: [],
+        },
+        basePath,
+      ),
+    /Invalid bridge\.enableStreaming/,
   );
 });
 

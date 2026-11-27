@@ -39,6 +39,7 @@ export function createDefaultRawConfig(): RawPluginConfig {
       maxMessageChars: 1600,
       autoSettleThread: false,
       enableSlashCommands: true,
+      enableStreaming: true,
     },
     gateway: {
       bridgeUrl: 'http://127.0.0.1:18773/events',
@@ -113,6 +114,9 @@ export function applyConfigSet(raw: RawPluginConfig, key: string, value: string)
     case 'bridge.enableSlashCommands':
       next.bridge.enableSlashCommands = parseBool(value);
       break;
+    case 'bridge.enableStreaming':
+      next.bridge.enableStreaming = parseBool(value);
+      break;
     case 'gateway.bridgeUrl':
       next.gateway.bridgeUrl = value.trim();
       break;
@@ -150,7 +154,7 @@ export function applyConfigSet(raw: RawPluginConfig, key: string, value: string)
       break;
     default:
       throw new Error(
-        `Unknown config key "${key}". Supported keys: stateDir, credentialsFile, t3.origin, t3.executable, t3.home, t3.muteMobileCompletionThreadId, bridge.host, bridge.port, bridge.maxMessageChars, bridge.proactiveBackgroundReports, bridge.autoSettleThread, bridge.enableSlashCommands, gateway.bridgeUrl, gateway.requireMentionInGroup, gateway.stripPrefix, attachments.maxInboundBytes, attachments.maxOutboundBytes, attachments.maxPerMessage, attachments.downloadIdleTimeoutMs, attachments.downloadTotalTimeoutMs, attachments.uploadTimeoutMs`,
+        `Unknown config key "${key}". Supported keys: stateDir, credentialsFile, t3.origin, t3.executable, t3.home, t3.muteMobileCompletionThreadId, bridge.host, bridge.port, bridge.maxMessageChars, bridge.proactiveBackgroundReports, bridge.autoSettleThread, bridge.enableSlashCommands, bridge.enableStreaming, gateway.bridgeUrl, gateway.requireMentionInGroup, gateway.stripPrefix, attachments.maxInboundBytes, attachments.maxOutboundBytes, attachments.maxPerMessage, attachments.downloadIdleTimeoutMs, attachments.downloadTotalTimeoutMs, attachments.uploadTimeoutMs`,
       );
   }
   return next;

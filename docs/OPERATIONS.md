@@ -85,6 +85,7 @@ Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:18773/ready'
 | 网关日志报 `401` / IP 不在白名单 | 运行 `gateway` 机器的公网出口 IP 未登记 | 在 QQ 开放平台「开发设置 -> IP 白名单」补充当前公网 IP |
 | 收到消息但日志显示 `[unbound]` | 当前 QQ 用户的 `scope` 未加入 `bindings` | 复制日志里的 `c2c:<openid>` 执行 `t3-qqbot bind --scope ... --workspace ...` 并重启 |
 | `/update` 提示当前已是最新但 GitHub 已有新版本 | npm 仓库尚未同步推送该版本 | 按下文第 5 节执行 `npm publish --access public` 同步 npm |
+| 私聊流式回复中途截断或出现异常气泡 | 模型回复包含 `t3-thread://` 等非公网内部协议链接，或 QQ 流式接口临时拒收 | 插件默认自动将非 `http(s)` 内部协议链接清洗为 `「标题」` 并在 `state\bridge.log` 记录完整 `httpStatus`/`bizCode`/`bizMessage`；如需临时关闭私聊流式直发普通消息，可在 `config.json` 设置 `bridge.enableStreaming: false`（或执行 `t3-qqbot config set bridge.enableStreaming false`） |
 
 ---
 

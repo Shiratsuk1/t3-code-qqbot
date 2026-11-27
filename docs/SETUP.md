@@ -355,6 +355,7 @@ t3-qqbot service uninstall
 | `bridge.proactiveBackgroundReports` | `false` | 异步子任务超过 QQ 被动回复窗口时是否使用主动消息推送（需账号具备权限） |
 | `bridge.autoSettleThread` | `false` | 每轮回复结束后自动调用 `t3_thread_organize(settle)` 收起 T3 侧边栏活跃状态（官方 T3 直接支持；不屏蔽手机完成推送） |
 | `bridge.enableSlashCommands` | `true` | 是否启用 QQ 聊天内斜杠指令面板（`/help`、`/model`、`/think`、`/provider`、`/new`、`/threads`、`/use`、`/rewind`、`/stop`、`/update` 等） |
+| `bridge.enableStreaming` | `true` | 私聊（C2C）是否启用实时流式回复；设为 `false` 时跳过 `stream_messages` 接口，直接通过普通消息一次性送达（已自动清洗 `t3-thread://` 等非公网协议链接） |
 | `t3.muteMobileCompletionThreadId` | 省略 | 可选主会话 `threadId`，用于在配置菜单导出 `T3CODE_MUTE_MOBILE_COMPLETION_THREAD_ID`（需配合支持该环境变量的补丁/自编译 T3 服务端，官方原版暂未内置） |
 | `gateway.requireMentionInGroup` | `true` | 群聊是否要求 `@机器人` 才转发 |
 | `gateway.stripPrefix` | `""` | 可选指令前缀过滤（如设 `"/ai"` 则自动剥离消息开头的 `/ai`） |

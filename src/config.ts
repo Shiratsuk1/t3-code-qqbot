@@ -125,6 +125,9 @@ export function parseConfig(raw: RawPluginConfig, configPath: string): ResolvedP
   if (!Number.isInteger(maxMessageChars) || maxMessageChars < 100 || maxMessageChars > 4000) {
     throw new Error(`Invalid bridge.maxMessageChars (${maxMessageChars}); expected integer between 100 and 4000`);
   }
+  if (raw.bridge?.enableStreaming !== undefined && typeof raw.bridge.enableStreaming !== 'boolean') {
+    throw new Error(`Invalid bridge.enableStreaming (${String(raw.bridge.enableStreaming)}); expected boolean`);
+  }
   const rawBindings = Array.isArray(raw.bindings) ? raw.bindings : [];
   const bindings: ResolvedBinding[] = rawBindings.map((binding, index) => {
     if (!binding || typeof binding.scope !== 'string' || !binding.scope.trim()) {
@@ -250,6 +253,7 @@ export function parseConfig(raw: RawPluginConfig, configPath: string): ResolvedP
       maxMessageChars,
       autoSettleThread: Boolean(raw.bridge?.autoSettleThread),
       enableSlashCommands: raw.bridge?.enableSlashCommands ?? true,
+      enableStreaming: raw.bridge?.enableStreaming ?? true,
       testStaging: raw.bridge?.testStaging ? resolveRelative(configDir, raw.bridge.testStaging) : undefined,
     },
     gateway: {

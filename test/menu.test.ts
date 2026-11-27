@@ -27,7 +27,10 @@ test('applyConfigSet updates typed fields, syncs default bridgeUrl, and rejects 
   const updatedSettle = applyConfigSet(updatedPrefix, 'bridge.autoSettleThread', 'true');
   assert.equal(updatedSettle.bridge.autoSettleThread, true);
 
-  const updatedMute = applyConfigSet(updatedSettle, 't3.muteMobileCompletionThreadId', 'mcp:thread-123');
+  const updatedStream = applyConfigSet(updatedSettle, 'bridge.enableStreaming', 'false');
+  assert.equal(updatedStream.bridge.enableStreaming, false);
+
+  const updatedMute = applyConfigSet(updatedStream, 't3.muteMobileCompletionThreadId', 'mcp:thread-123');
   assert.equal(updatedMute.t3.muteMobileCompletionThreadId, 'mcp:thread-123');
 
   const updatedAtt = applyConfigSet(updatedMute, 'attachments.maxInboundBytes', String(300 * 1024 * 1024));
